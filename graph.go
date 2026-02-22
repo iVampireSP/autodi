@@ -16,12 +16,15 @@ type Graph struct {
 	TypeToField map[string]string      // typeStr → Container field name
 
 	cfg           *Config
-	shortToFull   map[string]string // short type name → full type string (e.g., "iam.AuthN" → "github.com/.../iam.AuthN")
-	pkgNameToPath map[string]string // pkg short name → full pkg path (e.g., "iam" → "github.com/.../iam")
+	shortToFull   map[string]string           // short type name → full type string (e.g., "iam.AuthN" → "github.com/.../iam.AuthN")
+	pkgNameToPath map[string]string           // pkg short name → full pkg path (e.g., "iam" → "github.com/.../iam")
+	ifaceTypes    map[string]*types.Interface // full typeStr → interface type from loaded packages
 }
 
 // BuildGraph constructs the dependency graph from discovered providers.
-func BuildGraph(providers []*Provider, cfg *Config, pkgIndex map[string]string) (*Graph, []error) {
+// ifaceTypes is an optional map of all exported interface types from loaded packages,
+// used as a fallback by AutoCollect when interface types aren't found in provider signatures.
+func BuildGraph(providers []*Provider, cfg *Config, pkgIndex map[string]string, ifaceTypes map[string]*types.Interface) (*Graph, []error) {
 	g := &Graph{
 		Providers:     providers,
 		ProviderMap:   make(map[string]*Provider),
@@ -31,6 +34,7 @@ func BuildGraph(providers []*Provider, cfg *Config, pkgIndex map[string]string) 
 		cfg:           cfg,
 		shortToFull:   make(map[string]string),
 		pkgNameToPath: make(map[string]string),
+		ifaceTypes:    ifaceTypes,
 	}
 
 	// Seed pkgNameToPath with the full package index from scanner
@@ -864,6 +868,16 @@ func (g *Graph) findIfaceType(typeStr string) *types.Interface {
 			}
 		}
 	}
+
+	// Fallback: look up from package-level interface types extracted by the scanner.
+	// This covers interfaces that are defined in loaded packages but not directly
+	// referenced in any provider's params/returns (e.g., jobs.Handler, mq.Listener).
+	if g.ifaceTypes != nil {
+		if iface, ok := g.ifaceTypes[typeStr]; ok {
+			return iface
+		}
+	}
+
 	return nil
 }
 

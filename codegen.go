@@ -195,27 +195,11 @@ func (cg *CodeGen) generateMain() (GeneratedFile, error) {
 	// Now generate the main function
 	var mainBuf bytes.Buffer
 
-	// Embed directives
-	for _, embed := range cg.cfg.Embeds {
-		fmt.Fprintf(&mainBuf, "//go:embed %s\n", embed.Pattern)
-		fmt.Fprintf(&mainBuf, "var %sFS embed.FS\n\n", embed.Dir)
-		cg.imports.Add("embed", "embed")
-	}
-
 	// main function
 	cg.imports.Add("os", "os")
 	cobraQualifier := cg.imports.Add("github.com/spf13/cobra", "cobra")
 
-	// Config init
-	configQualifier := cg.imports.Add(cg.cfg.Module+"/internal/infra/config", "config")
-
 	mainBuf.WriteString("func main() {\n")
-
-	// Initialize config
-	if len(cg.cfg.Embeds) > 0 {
-		embed := cg.cfg.Embeds[0]
-		fmt.Fprintf(&mainBuf, "\t%s.MustInitWithFS(%sFS, %q)\n\n", configQualifier, embed.Dir, embed.Dir)
-	}
 
 	// Root command
 	fmt.Fprintf(&mainBuf, "\troot := &%s.Command{Use: %q, Short: %q", cobraQualifier, cg.cfg.AppName, cg.cfg.AppShort)

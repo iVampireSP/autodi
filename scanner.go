@@ -45,6 +45,11 @@ type Scanner struct {
 
 	// PkgIndex maps package short name → full package path for all loaded packages.
 	PkgIndex map[string]string
+
+	// IfaceTypes maps full type string → *types.Interface for all exported interface
+	// types discovered in loaded packages. Used by AutoCollect to find interface types
+	// that aren't directly referenced in any provider's params/returns.
+	IfaceTypes map[string]*types.Interface
 }
 
 // NewScanner creates a scanner.
@@ -96,6 +101,9 @@ func (s *Scanner) Scan() ([]*Provider, error) {
 		}
 	}
 
+	// Extract interface types from all loaded packages (and their in-module imports)
+	s.buildIfaceTypes(pkgs)
+
 	// Extract providers from each package
 	var providers []*Provider
 	for _, pkg := range pkgs {
@@ -107,6 +115,44 @@ func (s *Scanner) Scan() ([]*Provider, error) {
 	}
 
 	return providers, nil
+}
+
+// buildIfaceTypes extracts all exported interface types from loaded packages
+// and their in-module imports. This allows AutoCollect to find interface types
+// that aren't directly used in any provider's signature.
+func (s *Scanner) buildIfaceTypes(pkgs []*packages.Package) {
+	s.IfaceTypes = make(map[string]*types.Interface)
+	visited := make(map[string]bool)
+
+	var extract func(pkg *packages.Package)
+	extract = func(pkg *packages.Package) {
+		if pkg.Types == nil || visited[pkg.PkgPath] {
+			return
+		}
+		visited[pkg.PkgPath] = true
+
+		scope := pkg.Types.Scope()
+		for _, name := range scope.Names() {
+			obj := scope.Lookup(name)
+			if !obj.Exported() {
+				continue
+			}
+			if iface, ok := obj.Type().Underlying().(*types.Interface); ok {
+				typeStr := types.TypeString(obj.Type(), nil)
+				s.IfaceTypes[typeStr] = iface
+			}
+		}
+		// Also process imports within the same module
+		for _, imp := range pkg.Imports {
+			if strings.HasPrefix(imp.PkgPath, s.cfg.Module) {
+				extract(imp)
+			}
+		}
+	}
+
+	for _, pkg := range pkgs {
+		extract(pkg)
+	}
 }
 
 // buildPatterns converts scan config paths to Go package patterns.

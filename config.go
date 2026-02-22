@@ -13,9 +13,6 @@ type Config struct {
 	AppName  string
 	AppShort string
 	AppLong  string
-
-	// From //autodi:embed annotations
-	Embeds []EmbedConfig
 }
 
 // GroupConfig defines a collection of providers implementing an interface.

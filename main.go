@@ -68,7 +68,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "autodi: discovered %d providers\n", len(providers))
 	}
 
-	graph, errs := BuildGraph(providers, cfg, scanner.PkgIndex)
+	graph, errs := BuildGraph(providers, cfg, scanner.PkgIndex, scanner.IfaceTypes)
 	if len(errs) > 0 {
 		for _, e := range errs {
 			fmt.Fprintf(os.Stderr, "autodi: %v\n", e)

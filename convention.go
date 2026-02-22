@@ -8,12 +8,6 @@ import (
 	"strings"
 )
 
-// EmbedConfig represents a go:embed directive to generate.
-type EmbedConfig struct {
-	Pattern string // e.g., "configs/*.yaml"
-	Dir     string // e.g., "configs"
-}
-
 // BuildConfig builds a Config from go.mod + generate.go conventions.
 func BuildConfig(moduleRoot string) (*Config, error) {
 	module, err := parseModulePath(moduleRoot)
@@ -21,7 +15,7 @@ func BuildConfig(moduleRoot string) (*Config, error) {
 		return nil, err
 	}
 
-	appName, appShort, appLong, embeds, groups, err := parseGenerateFile(moduleRoot)
+	appName, appShort, appLong, groups, err := parseGenerateFile(moduleRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -39,7 +33,6 @@ func BuildConfig(moduleRoot string) (*Config, error) {
 		AppName:  appName,
 		AppShort: appShort,
 		AppLong:  appLong,
-		Embeds:   embeds,
 	}
 	return cfg, nil
 }
@@ -61,7 +54,7 @@ func parseModulePath(root string) (string, error) {
 	return "", fmt.Errorf("module directive not found in go.mod")
 }
 
-func parseGenerateFile(root string) (appName, appShort, appLong string, embeds []EmbedConfig, groups map[string]GroupConfig, err error) {
+func parseGenerateFile(root string) (appName, appShort, appLong string, groups map[string]GroupConfig, err error) {
 	path := filepath.Join(root, "generate.go")
 	data, readErr := os.ReadFile(path)
 	if readErr != nil {
@@ -95,15 +88,6 @@ func parseGenerateFile(root string) (appName, appShort, appLong string, embeds [
 			}
 			if len(quoted) >= 2 {
 				appLong = quoted[1]
-			}
-
-		case "embed":
-			// //autodi:embed configs/*.yaml configs
-			if len(parts) >= 3 {
-				embeds = append(embeds, EmbedConfig{
-					Pattern: parts[1],
-					Dir:     parts[2],
-				})
 			}
 
 		case "group":
