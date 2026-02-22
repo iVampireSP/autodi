@@ -15,8 +15,8 @@ type Graph struct {
 	Groups      map[string][]*Provider // group name → providers
 	TypeToField map[string]string      // typeStr → Container field name
 
-	cfg          *Config
-	shortToFull  map[string]string // short type name → full type string (e.g., "iam.AuthN" → "github.com/.../iam.AuthN")
+	cfg           *Config
+	shortToFull   map[string]string // short type name → full type string (e.g., "iam.AuthN" → "github.com/.../iam.AuthN")
 	pkgNameToPath map[string]string // pkg short name → full pkg path (e.g., "iam" → "github.com/.../iam")
 }
 
@@ -480,6 +480,13 @@ func (g *Graph) ValidateEntry(name string, providers []*Provider) []error {
 			}
 			resolved := g.resolveType(param.TypeStr)
 			if !provided[resolved] {
+				// Skip []Interface params that can be auto-collected
+				if strings.HasPrefix(param.TypeStr, "[]") {
+					elemType := param.TypeStr[2:]
+					if autoProviders := g.AutoCollect(elemType); len(autoProviders) > 0 {
+						continue
+					}
+				}
 				errs = append(errs, fmt.Errorf(
 					"entry %q: %s.%s 缺少依赖 %s",
 					name, p.PkgName, p.FuncName, toShortTypeName(param.TypeStr),
@@ -600,6 +607,14 @@ func (g *Graph) formatCycleProviders(cycle []string) string {
 
 // TopologicalSort returns providers in dependency order for the given target types.
 func (g *Graph) TopologicalSort(targetTypes []string) ([]*Provider, error) {
+	return g.TopologicalSortWithExtraEdges(targetTypes, nil)
+}
+
+// TopologicalSortWithExtraEdges sorts providers with additional synthetic dependency edges.
+// extraEdges maps a provider's return type to extra dependency type strings that must be
+// visited before it. This is used for deep auto-collected slice parameters whose
+// item-provider dependencies must precede the consuming provider.
+func (g *Graph) TopologicalSortWithExtraEdges(targetTypes []string, extraEdges map[string][]string) ([]*Provider, error) {
 	visited := make(map[string]bool)
 	var order []*Provider
 	visiting := make(map[string]bool) // for cycle detection during sort
@@ -630,6 +645,19 @@ func (g *Graph) TopologicalSort(targetTypes []string) ([]*Provider, error) {
 			}
 		}
 
+		// Visit extra edges (synthetic dependencies from auto-collected slice items)
+		if extraEdges != nil {
+			for _, ret := range provider.Returns {
+				if extras, ok := extraEdges[ret.TypeStr]; ok {
+					for _, extra := range extras {
+						if err := visit(extra); err != nil {
+							return err
+						}
+					}
+				}
+			}
+		}
+
 		visited[resolved] = true
 		delete(visiting, resolved)
 
@@ -654,7 +682,6 @@ func (g *Graph) TopologicalSort(targetTypes []string) ([]*Provider, error) {
 
 	return order, nil
 }
-
 
 // ProvidersForTypes returns singleton providers needed for the given type strings, in dependency order.
 // Used by the new codegen to trace transitive dependencies from NewCommand parameter types.
@@ -710,6 +737,134 @@ func (g *Graph) ProvidersForTypes(typeStrs []string) ([]*Provider, error) {
 	sort.Strings(targets)
 
 	return g.TopologicalSort(targets)
+}
+
+// ProvidersForTypesWithExtraEdges is like ProvidersForTypes but accepts extra synthetic
+// dependency edges for the topological sort.
+func (g *Graph) ProvidersForTypesWithExtraEdges(typeStrs []string, extraEdges map[string][]string) ([]*Provider, error) {
+	expanded := make(map[string]bool)
+	var expand func(string)
+	expand = func(typeStr string) {
+		resolved := g.resolveType(typeStr)
+		if expanded[resolved] {
+			return
+		}
+		expanded[resolved] = true
+
+		provider := g.ProviderMap[resolved]
+		if provider == nil {
+			return
+		}
+		for _, param := range provider.Params {
+			expand(param.TypeStr)
+		}
+	}
+
+	for _, t := range typeStrs {
+		expand(t)
+	}
+
+	for _, p := range g.Providers {
+		if !p.IsInvoke {
+			continue
+		}
+		allSatisfied := true
+		for _, param := range p.Params {
+			resolved := g.resolveType(param.TypeStr)
+			if !expanded[resolved] {
+				allSatisfied = false
+				break
+			}
+		}
+		if allSatisfied {
+			for _, ret := range p.Returns {
+				expanded[ret.TypeStr] = true
+			}
+		}
+	}
+
+	var targets []string
+	for t := range expanded {
+		targets = append(targets, t)
+	}
+	sort.Strings(targets)
+
+	return g.TopologicalSortWithExtraEdges(targets, extraEdges)
+}
+
+// AutoCollect scans all providers and returns those whose return type implements
+// the given interface type string. Used for automatic slice injection when no
+// explicit group is configured.
+func (g *Graph) AutoCollect(elemTypeStr string) []*Provider {
+	// Find the interface type from known types
+	ifaceType := g.findIfaceType(elemTypeStr)
+	if ifaceType == nil {
+		return nil
+	}
+
+	var matches []*Provider
+	for _, p := range g.Providers {
+		if p.IsInvoke {
+			continue
+		}
+		for _, ret := range p.Returns {
+			// Check both T and *T implementing the interface
+			if types.Implements(ret.Type, ifaceType) {
+				matches = append(matches, p)
+				break
+			}
+			if ptr, ok := ret.Type.(*types.Pointer); ok {
+				if types.Implements(ptr, ifaceType) {
+					matches = append(matches, p)
+					break
+				}
+			} else {
+				// ret.Type is not a pointer, check if *ret.Type implements
+				ptrType := types.NewPointer(ret.Type)
+				if types.Implements(ptrType, ifaceType) {
+					matches = append(matches, p)
+					break
+				}
+			}
+		}
+	}
+
+	// Sort by package path for deterministic output
+	sort.Slice(matches, func(i, j int) bool {
+		return matches[i].PkgPath < matches[j].PkgPath
+	})
+	return matches
+}
+
+// findIfaceType finds the *types.Interface underlying type for a given type string.
+func (g *Graph) findIfaceType(typeStr string) *types.Interface {
+	// Search all providers' params and returns for a matching interface type
+	for _, p := range g.Providers {
+		for _, param := range p.Params {
+			if param.TypeStr == typeStr && param.IsIface {
+				if iface, ok := param.Type.Underlying().(*types.Interface); ok {
+					return iface
+				}
+			}
+			// Check slice element: if param is []Interface, extract the element type
+			if strings.HasPrefix(param.TypeStr, "[]") && param.TypeStr[2:] == typeStr {
+				// The param.Type is a *types.Slice, get elem
+				if sliceType, ok := param.Type.Underlying().(*types.Slice); ok {
+					if iface, ok := sliceType.Elem().Underlying().(*types.Interface); ok {
+						return iface
+					}
+				}
+			}
+		}
+		for _, ret := range p.Returns {
+			if ret.TypeStr == typeStr && ret.IsIface {
+				if iface, ok := ret.Type.Underlying().(*types.Interface); ok {
+					return iface
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func isProviderInList(p *Provider, list []*Provider) bool {

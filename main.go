@@ -7,16 +7,16 @@
 //
 // Generation flow:
 //
-//	1. Read go.mod → module path
-//	2. Read generate.go → //autodi:app/embed/group annotations
-//	3. Scan internal/ + pkg/ → provider discovery (New* constructors)
-//	4. Build dependency graph + resolve bindings + detect Close/Shutdown/Stop
-//	5. Scan cmd/ → discover commands:
-//	   - New*(deps...) returns *T with Command() method + handler methods
-//	   - New*() zero-dep returns *T with same pattern
-//	6. For each DI command:
-//	   Analyze New* params → trace transitive deps → generate init function
-//	7. Generate main.go with two-phase DI
+//  1. Read go.mod → module path
+//  2. Read generate.go → //autodi:app/embed/group annotations
+//  3. Scan internal/ + pkg/ → provider discovery (New* constructors)
+//  4. Build dependency graph + resolve bindings + detect Close/Shutdown/Stop
+//  5. Scan cmd/ → discover commands:
+//     - New*(deps...) returns *T with Command() method + handler methods
+//     - New*() zero-dep returns *T with same pattern
+//  6. For each DI command:
+//     Analyze New* params → trace transitive deps → generate init function
+//  7. Generate main.go with two-phase DI
 //
 // Usage:
 //

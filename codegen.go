@@ -398,6 +398,13 @@ func (cg *CodeGen) generateMain() (GeneratedFile, error) {
 	return GeneratedFile{Name: "main.go", Content: src}, nil
 }
 
+// autoCollectParam records an auto-collected slice parameter.
+type autoCollectParam struct {
+	idx       int
+	elemType  string      // element type string (e.g., "github.com/.../seed.Seeder")
+	providers []*Provider // collected providers
+}
+
 // generateInitFunc generates an init<Cmd> function for a DI command.
 func (cg *CodeGen) generateInitFunc(buf *bytes.Buffer, cmd *DiscoveredCommand, cmdAlias string) error {
 	exportName := cmdExportName(cmd.Name)
@@ -409,6 +416,7 @@ func (cg *CodeGen) generateInitFunc(buf *bytes.Buffer, cmd *DiscoveredCommand, c
 		idx       int
 		groupName string
 	}
+	var autoParams []autoCollectParam
 
 	for i, param := range cmd.Params {
 		groupName := cg.matchGroup(param.TypeStr)
@@ -423,6 +431,24 @@ func (cg *CodeGen) generateInitFunc(buf *bytes.Buffer, cmd *DiscoveredCommand, c
 					neededTypes = append(neededTypes, dep.TypeStr)
 				}
 			}
+		} else if strings.HasPrefix(param.TypeStr, "[]") {
+			// Auto-collect: scan all providers implementing this interface
+			elemType := param.TypeStr[2:]
+			autoProviders := cg.graph.AutoCollect(elemType)
+			if len(autoProviders) > 0 {
+				autoParams = append(autoParams, autoCollectParam{
+					idx:       i,
+					elemType:  elemType,
+					providers: autoProviders,
+				})
+				for _, p := range autoProviders {
+					for _, dep := range p.Params {
+						neededTypes = append(neededTypes, dep.TypeStr)
+					}
+				}
+			} else {
+				neededTypes = append(neededTypes, param.TypeStr)
+			}
 		} else {
 			neededTypes = append(neededTypes, param.TypeStr)
 		}
@@ -432,6 +458,66 @@ func (cg *CodeGen) generateInitFunc(buf *bytes.Buffer, cmd *DiscoveredCommand, c
 	providers, err := cg.graph.ProvidersForTypes(neededTypes)
 	if err != nil {
 		return fmt.Errorf("resolve deps for %s: %w", cmd.Name, err)
+	}
+
+	// Deep auto-collection: scan resolved providers for []Interface params
+	// that aren't handled by groups or command-level auto-collection.
+	deepAutoMap := make(map[string][]autoCollectParam) // provider typeStr → auto-collected params
+	needsResolve := false
+	for _, p := range providers {
+		for i, param := range p.Params {
+			if !strings.HasPrefix(param.TypeStr, "[]") {
+				continue
+			}
+			// Skip if already handled by group
+			if cg.matchGroup(param.TypeStr) != "" {
+				continue
+			}
+			elemType := param.TypeStr[2:]
+			autoProviders := cg.graph.AutoCollect(elemType)
+			if len(autoProviders) > 0 {
+				key := p.PkgPath + "." + p.FuncName
+				deepAutoMap[key] = append(deepAutoMap[key], autoCollectParam{
+					idx:       i,
+					elemType:  elemType,
+					providers: autoProviders,
+				})
+				for _, ap := range autoProviders {
+					for _, dep := range ap.Params {
+						neededTypes = append(neededTypes, dep.TypeStr)
+					}
+				}
+				needsResolve = true
+			}
+		}
+	}
+
+	// Re-resolve if deep auto-collection added new dependencies
+	if needsResolve {
+		// Build extra edges: consuming provider's return type → auto-collected providers' dependency types.
+		// This ensures the topological sort places auto-collected deps before the consuming provider.
+		extraEdges := make(map[string][]string)
+		for _, p := range providers {
+			key := p.PkgPath + "." + p.FuncName
+			aps, ok := deepAutoMap[key]
+			if !ok {
+				continue
+			}
+			for _, ret := range p.Returns {
+				for _, ap := range aps {
+					for _, cp := range ap.providers {
+						for _, dep := range cp.Params {
+							extraEdges[ret.TypeStr] = append(extraEdges[ret.TypeStr], dep.TypeStr)
+						}
+					}
+				}
+			}
+		}
+
+		providers, err = cg.graph.ProvidersForTypesWithExtraEdges(neededTypes, extraEdges)
+		if err != nil {
+			return fmt.Errorf("resolve deps for %s (after auto-collect): %w", cmd.Name, err)
+		}
 	}
 
 	// Build type → local var name mapping
@@ -460,6 +546,25 @@ func (cg *CodeGen) generateInitFunc(buf *bytes.Buffer, cmd *DiscoveredCommand, c
 			}
 		}
 	}
+	// Auto-collected provider params are consumed (command-level + deep)
+	for _, ap := range autoParams {
+		for _, p := range ap.providers {
+			for _, dep := range p.Params {
+				consumedTypes[dep.TypeStr] = true
+				consumedTypes[cg.graph.resolveType(dep.TypeStr)] = true
+			}
+		}
+	}
+	for _, aps := range deepAutoMap {
+		for _, ap := range aps {
+			for _, p := range ap.providers {
+				for _, dep := range p.Params {
+					consumedTypes[dep.TypeStr] = true
+					consumedTypes[cg.graph.resolveType(dep.TypeStr)] = true
+				}
+			}
+		}
+	}
 	// Interface bindings: if an interface is consumed, its concrete type is too
 	for ifaceStr, concreteStr := range cg.graph.Bindings {
 		if consumedTypes[ifaceStr] {
@@ -481,9 +586,35 @@ func (cg *CodeGen) generateInitFunc(buf *bytes.Buffer, cmd *DiscoveredCommand, c
 		cg.imports.Add("fmt", "fmt")
 	}
 
-	// Generate provider calls in topological order
+	// Generate provider calls in topological order.
+	// For providers with []Interface params (deep auto-collect), generate the slice
+	// just before calling that provider.
 	var closeables []CloseableField
 	for _, p := range providers {
+		// Check if this provider has deep auto-collected params
+		key := p.PkgPath + "." + p.FuncName
+		if aps, ok := deepAutoMap[key]; ok {
+			for _, ap := range aps {
+				varName := deriveSliceVarName(ap.elemType)
+				if usedVars[varName] {
+					varName = varName + "Auto"
+				}
+				usedVars[varName] = true
+
+				ifaceType := cg.shortType(ap.elemType)
+				fmt.Fprintf(buf, "\t%s := []%s{\n", varName, ifaceType)
+				for _, cp := range ap.providers {
+					qualifier := cg.qualifyFunc(cp)
+					args := cg.buildLocalArgs(cp, varMap)
+					fmt.Fprintf(buf, "\t\t%s(%s),\n", qualifier, strings.Join(args, ", "))
+				}
+				buf.WriteString("\t}\n\n")
+
+				// Register in varMap so the provider call can reference it
+				varMap[p.Params[ap.idx].TypeStr] = varName
+			}
+		}
+
 		cg.writeLocalProviderCall(buf, p, varMap, usedVars, &closeables, consumedTypes)
 		buf.WriteString("\n")
 	}
@@ -526,6 +657,26 @@ func (cg *CodeGen) generateInitFunc(buf *bytes.Buffer, cmd *DiscoveredCommand, c
 
 		// Register the slice in varMap for the NewCommand call
 		varMap[cmd.Params[gp.idx].TypeStr] = groupVarName
+	}
+
+	// Build auto-collected slices
+	for _, ap := range autoParams {
+		varName := deriveSliceVarName(ap.elemType)
+		if usedVars[varName] {
+			varName = varName + "Auto"
+		}
+		usedVars[varName] = true
+
+		ifaceType := cg.shortType(ap.elemType)
+		fmt.Fprintf(buf, "\t%s := []%s{\n", varName, ifaceType)
+		for _, p := range ap.providers {
+			qualifier := cg.qualifyFunc(p)
+			args := cg.buildLocalArgs(p, varMap)
+			fmt.Fprintf(buf, "\t\t%s(%s),\n", qualifier, strings.Join(args, ", "))
+		}
+		buf.WriteString("\t}\n\n")
+
+		varMap[cmd.Params[ap.idx].TypeStr] = varName
 	}
 
 	// Build NewCommand args
@@ -689,28 +840,60 @@ func (cg *CodeGen) matchGroup(typeStr string) string {
 	return ""
 }
 
-// isTypeNeeded checks if a type is needed by the command or its group providers.
+// isTypeNeeded checks if a type is needed by the command or its group/auto-collected providers.
 func (cg *CodeGen) isTypeNeeded(typeStr string, neededTypes []string, cmd *DiscoveredCommand) bool {
 	for _, t := range neededTypes {
 		if t == typeStr {
 			return true
 		}
 	}
-	// Check group provider params
+	// Check group provider params and auto-collected provider params
 	for _, param := range cmd.Params {
 		groupName := cg.matchGroup(param.TypeStr)
-		if groupName == "" {
-			continue
-		}
-		for _, p := range cg.graph.Groups[groupName] {
-			for _, dep := range p.Params {
-				if dep.TypeStr == typeStr {
-					return true
+		if groupName != "" {
+			for _, p := range cg.graph.Groups[groupName] {
+				for _, dep := range p.Params {
+					if dep.TypeStr == typeStr {
+						return true
+					}
+				}
+			}
+		} else if strings.HasPrefix(param.TypeStr, "[]") {
+			elemType := param.TypeStr[2:]
+			autoProviders := cg.graph.AutoCollect(elemType)
+			for _, p := range autoProviders {
+				for _, dep := range p.Params {
+					if dep.TypeStr == typeStr {
+						return true
+					}
 				}
 			}
 		}
 	}
 	return false
+}
+
+// deriveSliceVarName generates a local variable name from an interface type string.
+// "github.com/.../seed.Seeder" → "seeders"
+// "github.com/.../provider.CNIDriver" → "cniDrivers"
+func deriveSliceVarName(elemTypeStr string) string {
+	// Extract the short type name from the full path
+	short := toShortTypeName(elemTypeStr)
+	// Remove package prefix: "seed.Seeder" → "Seeder", "provider.CNIDriver" → "CNIDriver"
+	if dotIdx := strings.LastIndex(short, "."); dotIdx >= 0 {
+		short = short[dotIdx+1:]
+	}
+	// Pluralize and lowercase
+	return localVarName(pluralizeName(short))
+}
+
+// pluralizeName appends "s" or "es" to make a plural form.
+// "Seeder" → "Seeders", "Driver" → "Drivers"
+func pluralizeName(name string) string {
+	if strings.HasSuffix(name, "s") || strings.HasSuffix(name, "x") || strings.HasSuffix(name, "z") {
+		return name + "es"
+	}
+	return name + "s"
 }
 
 // qualifyFunc returns the qualified function call like "iam.NewIAM".
