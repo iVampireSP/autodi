@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>testapp — DI Graph</title>
+<script src="https://cdn.jsdelivr.net/npm/graphology@0.25.4/dist/graphology.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/graphology-layout-forceatlas2@0.10.1/dist/graphology-layout-forceatlas2.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sigma@2.4.0/build/sigma.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#0f1117;color:#ddd;overflow:hidden}
+#toolbar{position:fixed;top:0;left:0;right:0;height:48px;background:#1a1d27;border-bottom:1px solid #2a2d3a;z-index:10;display:flex;align-items:center;padding:0 16px;gap:12px}
+#toolbar h1{font-size:14px;font-weight:600;white-space:nowrap}
+#search{flex:1;max-width:280px;padding:5px 10px;background:#252836;border:1px solid #3a3d4a;border-radius:6px;color:#ddd;font-size:13px;outline:none}
+#search::placeholder{color:#666}
+#node-count{font-size:11px;color:#666;white-space:nowrap}
+#hint{font-size:11px;color:#555;white-space:nowrap}
+#sigma-container{position:absolute;top:48px;left:0;right:0;bottom:0}
+#tooltip{position:fixed;background:#1c1f2eee;border:1px solid #3a3d4a;border-radius:8px;padding:10px 13px;font-size:12px;line-height:1.5;max-width:260px;z-index:20;pointer-events:none;display:none;box-shadow:0 4px 12px #0006}
+.tt-title{font-weight:600;font-size:13px;margin-bottom:3px}
+.tt-sub{color:#888;font-size:11px;margin-bottom:4px}
+.tt-badge{display:inline-block;padding:1px 7px;border-radius:10px;font-size:10px;font-weight:600;color:#fff;margin-bottom:5px}
+.tt-stat{color:#aaa;margin-top:2px}
+.tt-divider{border-top:1px solid #2a2d3a;margin:6px 0}
+.tt-method{color:#8ab;font-size:11px}
+#legend{position:fixed;bottom:16px;right:16px;background:#1a1d27cc;border:1px solid #2a2d3a;border-radius:8px;padding:10px 13px;z-index:10;font-size:12px;backdrop-filter:blur(4px)}
+.li{display:flex;align-items:center;gap:7px;line-height:2}
+.dot{width:11px;height:11px;border-radius:50%;flex-shrink:0}
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <h1>testapp — DI Graph</h1>
+  <input id="search" type="search" placeholder="Search nodes…">
+  <span id="node-count"></span>
+  <span id="hint">click node to highlight · click background to reset</span>
+</div>
+<div id="sigma-container"></div>
+<div id="tooltip"></div>
+<div id="legend"><div class="li"><span class="dot" style="background:#27ae60"></span>Leaf provider</div><div class="li"><span class="dot" style="background:#2980b9"></span>Provider</div><div class="li"><span class="dot" style="background:#8e44ad"></span>Invoke</div><div class="li"><span class="dot" style="background:#c0392b"></span>Decorator</div><div class="li"><span class="dot" style="background:#e67e22"></span>Interface</div><div class="li"><span class="dot" style="background:#4a6fa5"></span>Command</div></div>
+<script>
+(function(){
+'use strict';
+
+const DATA = {"nodes":[{"key":"P_config_NewConfig","attributes":{"color":"#27ae60","depCount":4,"label":"*Config\nNewConfig","nodeType":"leaf","pkg":"internal/config","size":20}},{"key":"P_cache_NewCache","attributes":{"color":"#2980b9","depCount":1,"label":"*Cache\nNewCache","nodeType":"provider","pkg":"internal/cache","size":11}},{"key":"P_db_NewDB","attributes":{"color":"#2980b9","depCount":1,"label":"*DB\nNewDB","nodeType":"provider","pkg":"internal/db","size":11}},{"key":"P_mailer_NewMailer","attributes":{"color":"#2980b9","depCount":2,"label":"*Mailer\nNewMailer","nodeType":"provider","pkg":"internal/mailer","size":14}},{"key":"P_email_NewEmail","attributes":{"color":"#2980b9","depCount":0,"label":"*Email\nNewEmail","nodeType":"provider","pkg":"internal/notify/email","size":8}},{"key":"P_slack_NewSlack","attributes":{"color":"#2980b9","depCount":0,"label":"*Slack\nNewSlack","nodeType":"provider","pkg":"internal/notify/slack","size":8}},{"key":"P_user_NewUser","attributes":{"color":"#2980b9","depCount":1,"label":"*Service\nNewUser","nodeType":"provider","pkg":"internal/user","size":11}},{"key":"IF_notify_Notifier","attributes":{"color":"#e67e22","implCount":2,"label":"«iface»\nNotifier","nodeType":"iface","size":16,"useCount":1}},{"key":"C_api","attributes":{"color":"#4a6fa5","label":"api\nCreate | List","nodeType":"command","size":14}},{"key":"C_worker","attributes":{"color":"#4a6fa5","label":"worker\nHandle","nodeType":"command","size":14}}],"edges":[{"key":"e0","source":"P_email_NewEmail","target":"IF_notify_Notifier","attributes":{"color":"#e67e22","label":"implements","size":1.5}},{"key":"e1","source":"P_slack_NewSlack","target":"IF_notify_Notifier","attributes":{"color":"#e67e22","label":"implements","size":1.5}},{"key":"e2","source":"P_config_NewConfig","target":"P_cache_NewCache","attributes":{"color":"#6c757d","label":"","size":1.5}},{"key":"e3","source":"P_config_NewConfig","target":"P_db_NewDB","attributes":{"color":"#6c757d","label":"","size":1.5}},{"key":"e4","source":"IF_notify_Notifier","target":"P_mailer_NewMailer","attributes":{"color":"#5dade2","label":"[]Notifier","size":1.5}},{"key":"e5","source":"P_config_NewConfig","target":"P_email_NewEmail","attributes":{"color":"#6c757d","label":"","size":1.5}},{"key":"e6","source":"P_config_NewConfig","target":"P_slack_NewSlack","attributes":{"color":"#6c757d","label":"","size":1.5}},{"key":"e7","source":"P_db_NewDB","target":"P_user_NewUser","attributes":{"color":"#6c757d","label":"","size":1.5}},{"key":"e8","source":"P_cache_NewCache","target":"P_user_NewUser","attributes":{"color":"#6c757d","label":"","size":1.5}},{"key":"e9","source":"P_user_NewUser","target":"C_api","attributes":{"color":"#6c757d","label":"","size":1.5}},{"key":"e10","source":"P_mailer_NewMailer","target":"C_api","attributes":{"color":"#6c757d","label":"","size":1.5}},{"key":"e11","source":"P_mailer_NewMailer","target":"C_worker","attributes":{"color":"#6c757d","label":"","size":1.5}}]};
+
+function buildTooltip(node, a) {
+  const typeLabel = {leaf:'Leaf',provider:'Provider',invoke:'Invoke',decorator:'Decorator',iface:'Interface',command:'Command'};
+  let h = '<div class="tt-title">' + a.label.replace(/\n/g,'<br>') + '</div>';
+  if (a.pkg) h += '<div class="tt-sub">' + a.pkg + '</div>';
+  h += '<span class="tt-badge" style="background:' + a.color + '">' + (typeLabel[a.nodeType]||a.nodeType) + '</span>';
+  if (a.depCount > 0)   h += '<div class="tt-stat">→ used by <b>' + a.depCount + '</b></div>';
+  if (a.implCount > 0 || a.useCount > 0)
+    h += '<div class="tt-stat">' + a.implCount + ' impl · ' + a.useCount + ' use</div>';
+  return h;
+}
+
+// ── Build graphology graph ────────────────────────────────────────────────────
+const graph = new graphology.Graph({multi: true, type: 'directed'});
+DATA.nodes.forEach(n => graph.addNode(n.key, n.attributes));
+DATA.edges.forEach(e => {
+  try { graph.addEdge(e.source, e.target, e.attributes); } catch(_) {}
+});
+
+// ── ForceAtlas2 initial layout ────────────────────────────────────────────────
+const iters = DATA.nodes.length > 60 ? 200 : 100;
+forceAtlas2.assign(graph, {
+  iterations: iters,
+  settings: {
+    gravity: 1,
+    scalingRatio: 20,
+    barnesHutOptimize: DATA.nodes.length > 50,
+    slowDown: 3,
+    linLogMode: false,
+  }
+});
+
+// ── Sigma renderer ────────────────────────────────────────────────────────────
+const container = document.getElementById('sigma-container');
+const renderer = new Sigma(graph, container, {
+  defaultEdgeType: 'arrow',
+  renderEdgeLabels: true,
+  labelFont: 'system-ui, sans-serif',
+  labelSize: 12,
+  labelWeight: '500',
+  labelColor: {color: '#c8c8c8'},
+  edgeLabelFont: 'system-ui, sans-serif',
+  edgeLabelSize: 9,
+  edgeLabelColor: {color: '#666'},
+  minCameraRatio: 0.05,
+  maxCameraRatio: 20,
+  labelThreshold: 0.5,
+});
+
+// ── Node count ────────────────────────────────────────────────────────────────
+document.getElementById('node-count').textContent =
+  DATA.nodes.length + ' nodes · ' + DATA.edges.length + ' edges';
+
+// ── Tooltip ───────────────────────────────────────────────────────────────────
+const tooltip = document.getElementById('tooltip');
+let mouseX = 0, mouseY = 0;
+document.addEventListener('mousemove', evt => {
+  mouseX = evt.clientX; mouseY = evt.clientY;
+  if (tooltip.style.display !== 'none') {
+    tooltip.style.left = (mouseX + 16) + 'px';
+    tooltip.style.top  = Math.min(mouseY + 8, window.innerHeight - 20) + 'px';
+  }
+});
+renderer.on('enterNode', ({node}) => {
+  const attrs = graph.getNodeAttributes(node);
+  tooltip.innerHTML = buildTooltip(node, attrs);
+  tooltip.style.left = (mouseX + 16) + 'px';
+  tooltip.style.top  = (mouseY + 8) + 'px';
+  tooltip.style.display = 'block';
+});
+renderer.on('leaveNode', () => { tooltip.style.display = 'none'; });
+
+// ── Click to highlight neighbours ─────────────────────────────────────────────
+const origColors = {};
+graph.forEachNode((n, attrs) => { origColors[n] = attrs.color; });
+let selected = null;
+
+renderer.on('clickNode', ({node}) => {
+  if (selected === node) {
+    selected = null;
+    graph.forEachNode(n => graph.setNodeAttribute(n, 'color', origColors[n]));
+  } else {
+    selected = node;
+    const nbrs = new Set(graph.neighbors(node));
+    nbrs.add(node);
+    graph.forEachNode(n => {
+      graph.setNodeAttribute(n, 'color', nbrs.has(n) ? origColors[n] : '#222232');
+    });
+  }
+  renderer.refresh();
+});
+renderer.on('clickStage', () => {
+  if (selected) {
+    selected = null;
+    graph.forEachNode(n => graph.setNodeAttribute(n, 'color', origColors[n]));
+    renderer.refresh();
+  }
+});
+
+// ── Search ─────────────────────────────────────────────────────────────────────
+document.getElementById('search').addEventListener('input', evt => {
+  const q = evt.target.value.toLowerCase().trim();
+  if (!q) {
+    graph.forEachNode(n => graph.setNodeAttribute(n, 'color', origColors[n]));
+  } else {
+    graph.forEachNode((n, attrs) => {
+      const match = attrs.label.toLowerCase().includes(q);
+      graph.setNodeAttribute(n, 'color', match ? origColors[n] : '#222232');
+    });
+  }
+  renderer.refresh();
+});
+
+})();
+</script>
+</body>
+</html>
