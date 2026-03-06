@@ -69,17 +69,32 @@ DATA.edges.forEach(e => {
 });
 
 // ── ForceAtlas2 initial layout ────────────────────────────────────────────────
+// CDN UMD global name varies between versions; try all known names.
+const FA2 = window.graphologyLayoutForceAtlas2 || window.ForceAtlas2 || window.forceAtlas2 ||
+            (window.graphologyLibrary && window.graphologyLibrary.layoutForceAtlas2);
 const iters = DATA.nodes.length > 60 ? 200 : 100;
-forceAtlas2.assign(graph, {
-  iterations: iters,
-  settings: {
-    gravity: 1,
-    scalingRatio: 20,
-    barnesHutOptimize: DATA.nodes.length > 50,
-    slowDown: 3,
-    linLogMode: false,
-  }
-});
+if (FA2) {
+  FA2.assign(graph, {
+    iterations: iters,
+    settings: {
+      gravity: 1,
+      scalingRatio: 20,
+      barnesHutOptimize: DATA.nodes.length > 50,
+      slowDown: 3,
+      linLogMode: false,
+    }
+  });
+} else {
+  // Fallback: circular layout so nodes are at least visible.
+  let angle = 0;
+  const step = (2 * Math.PI) / Math.max(DATA.nodes.length, 1);
+  const r = 150 + DATA.nodes.length * 8;
+  graph.forEachNode(n => {
+    graph.setNodeAttribute(n, 'x', r * Math.cos(angle));
+    graph.setNodeAttribute(n, 'y', r * Math.sin(angle));
+    angle += step;
+  });
+}
 
 // ── Sigma renderer ────────────────────────────────────────────────────────────
 const container = document.getElementById('sigma-container');
