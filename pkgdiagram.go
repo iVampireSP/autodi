@@ -424,13 +424,10 @@ func (g *pkgDiagramGen) isDecorator(pkg *pdPkgInfo, st *pdType) bool {
 
 // ── Node ID ───────────────────────────────────────────────────────────────────
 
-// typeNodeID produces a Mermaid-safe class identifier: e.g. "notify_Notifier", "email_Email".
-// Strips common prefixes (internal, cmd, pkg) to keep IDs readable.
+// typeNodeID produces a stable sigma node ID from the full relative package path.
+// Uses the full path to avoid collisions between packages like "internal/ring" and "pkg/ring".
 func (g *pkgDiagramGen) typeNodeID(pkg *pdPkgInfo, typeName string) string {
-	parts := strings.Split(pkg.RelPath, "/")
-	significant := pdFilterParts(parts)
-	base := strings.Join(significant, "_") + "_" + typeName
-	return sanitizeMermaidID(base)
+	return sanitizeMermaidID(pkg.RelPath + "_" + typeName)
 }
 
 // pdBriefType returns a display-safe type name for classDiagram members.

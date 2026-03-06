@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 )
 
@@ -230,6 +232,8 @@ func renderDIHTML(graph *Graph, commands []*DiscoveredCommand, cfg *Config) []by
 		addParamEdges("C_"+sanitizeMermaidID(cmd.Name), cmd.Params)
 	}
 
+	assignDIPositions(nodes, edges)
+
 	data := sigmaGraph{Nodes: nodes, Edges: edges}
 	jsonBytes, _ := json.Marshal(data)
 	title := cfg.AppName + " — DI Graph"
@@ -256,8 +260,13 @@ func renderPkgHTML(pkgInfos []*pdPkgInfo, rels []pdRelation, refByNode, implByNo
 	}
 
 	// ── Nodes ──────────────────────────────────────────────────────────────
+	addedNodes := make(map[string]bool)
 	addTypeNode := func(pkg *pdPkgInfo, t *pdType, nodeType string) {
 		id := pkgTypeNodeID(pkg, t.Name)
+		if addedNodes[id] {
+			return // skip duplicate (safety net)
+		}
+		addedNodes[id] = true
 		usedBy := refByNode[id]
 		impl := implByNode[id]
 		use := refByNode[id]
@@ -342,18 +351,18 @@ func renderPkgHTML(pkgInfos []*pdPkgInfo, rels []pdRelation, refByNode, implByNo
 		edgeIdx++
 	}
 
+	assignPkgPositions(nodes)
+
 	data := sigmaGraph{Nodes: nodes, Edges: edges}
 	jsonBytes, _ := json.Marshal(data)
 	return buildSigmaHTML("Package Diagram", pkgLegend(), string(jsonBytes), pkgTooltipFn())
 }
 
 // pkgTypeNodeID builds a stable sigma node ID for a package type.
-// Identical to pkgDiagramGen.typeNodeID but callable without a receiver.
+// Uses the full RelPath to avoid collisions between packages that share a suffix
+// (e.g. "internal/ring" vs "pkg/ring" would both become "ring_Ring" with prefix stripping).
 func pkgTypeNodeID(pkg *pdPkgInfo, typeName string) string {
-	parts := strings.Split(pkg.RelPath, "/")
-	significant := pdFilterParts(parts)
-	base := strings.Join(significant, "_") + "_" + typeName
-	return sanitizeMermaidID(base)
+	return sanitizeMermaidID(pkg.RelPath + "_" + typeName)
 }
 
 // isDecoratorPkg detects decorator pattern: struct implements an interface AND
@@ -470,6 +479,140 @@ func clampInt(v, lo, hi int) int {
 	return v
 }
 
+// assignDIPositions computes hierarchical x/y positions for the DI dependency graph.
+// Edges flow from dependency (source) to consumer (target).
+// Leaf providers with no incoming edges are placed at the top (layer 0);
+// each subsequent layer is placed further down.
+func assignDIPositions(nodes []sigmaNode, edges []sigmaEdge) {
+	if len(nodes) == 0 {
+		return
+	}
+
+	nodeIdx := make(map[string]int, len(nodes))
+	for i, n := range nodes {
+		nodeIdx[n.Key] = i
+	}
+
+	// Build adjacency: inDegree and outgoing neighbours.
+	outAdj := make(map[string][]string, len(nodes))
+	inDegree := make(map[string]int, len(nodes))
+	for _, n := range nodes {
+		outAdj[n.Key] = nil
+		inDegree[n.Key] = 0
+	}
+	for _, e := range edges {
+		if _, ok := nodeIdx[e.Source]; !ok {
+			continue
+		}
+		if _, ok := nodeIdx[e.Target]; !ok {
+			continue
+		}
+		outAdj[e.Source] = append(outAdj[e.Source], e.Target)
+		inDegree[e.Target]++
+	}
+
+	// Kahn's BFS with longest-path layer assignment.
+	layer := make(map[string]int, len(nodes))
+	queue := []string{}
+	for _, n := range nodes {
+		if inDegree[n.Key] == 0 {
+			layer[n.Key] = 0
+			queue = append(queue, n.Key)
+		}
+	}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, next := range outAdj[cur] {
+			if layer[cur]+1 > layer[next] {
+				layer[next] = layer[cur] + 1
+			}
+			inDegree[next]--
+			if inDegree[next] == 0 {
+				queue = append(queue, next)
+			}
+		}
+	}
+	// Nodes in cycles not yet assigned — place them one past the max layer.
+	maxLayer := 0
+	for _, l := range layer {
+		if l > maxLayer {
+			maxLayer = l
+		}
+	}
+	for _, n := range nodes {
+		if _, ok := layer[n.Key]; !ok {
+			layer[n.Key] = maxLayer + 1
+		}
+	}
+
+	// Group nodes by layer; sort within each layer for stable output.
+	layerNodes := make(map[int][]string)
+	for key, l := range layer {
+		layerNodes[l] = append(layerNodes[l], key)
+	}
+	for l := range layerNodes {
+		sort.Strings(layerNodes[l])
+	}
+
+	const layerH = 200.0
+	const nodeSpacing = 220.0
+
+	for l := 0; l <= maxLayer+1; l++ {
+		keys := layerNodes[l]
+		if len(keys) == 0 {
+			continue
+		}
+		totalW := float64(len(keys)-1) * nodeSpacing
+		for i, key := range keys {
+			idx := nodeIdx[key]
+			nodes[idx].Attributes["x"] = float64(i)*nodeSpacing - totalW/2
+			nodes[idx].Attributes["y"] = float64(l) * layerH
+		}
+	}
+}
+
+// assignPkgPositions assigns x/y to package-diagram nodes by clustering them
+// by package. Packages are arranged in a square grid; nodes within each
+// package are placed in a compact 2-column sub-grid.
+func assignPkgPositions(nodes []sigmaNode) {
+	if len(nodes) == 0 {
+		return
+	}
+
+	// Group node indices by package path.
+	pkgOrder := []string{}
+	pkgNodes := make(map[string][]int)
+	for i, n := range nodes {
+		pkg, _ := n.Attributes["pkg"].(string)
+		if _, seen := pkgNodes[pkg]; !seen {
+			pkgOrder = append(pkgOrder, pkg)
+		}
+		pkgNodes[pkg] = append(pkgNodes[pkg], i)
+	}
+	sort.Strings(pkgOrder)
+
+	cols := int(math.Ceil(math.Sqrt(float64(len(pkgOrder)))))
+	const pkgW = 340.0 // horizontal space per package cluster
+	const pkgH = 280.0 // vertical space per package cluster
+	const nodeH = 80.0 // vertical spacing within a cluster
+	const nodeColW = 150.0
+
+	for pi, pkg := range pkgOrder {
+		col := pi % cols
+		row := pi / cols
+		baseX := float64(col) * pkgW
+		baseY := float64(row) * pkgH
+
+		for ni, idx := range pkgNodes[pkg] {
+			c := ni % 2
+			r := ni / 2
+			nodes[idx].Attributes["x"] = baseX + float64(c)*nodeColW
+			nodes[idx].Attributes["y"] = baseY + float64(r)*nodeH
+		}
+	}
+}
+
 const sigmaHTMLTemplate = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -477,7 +620,6 @@ const sigmaHTMLTemplate = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{TITLE}}</title>
 <script src="https://cdn.jsdelivr.net/npm/graphology@0.25.4/dist/graphology.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/graphology-layout-forceatlas2@0.10.1/dist/graphology-layout-forceatlas2.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sigma@2.4.0/build/sigma.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -526,33 +668,8 @@ DATA.edges.forEach(e => {
   try { graph.addEdge(e.source, e.target, e.attributes); } catch(_) {}
 });
 
-// ── ForceAtlas2 initial layout ────────────────────────────────────────────────
-// CDN UMD global name varies between versions; try all known names.
-const FA2 = window.graphologyLayoutForceAtlas2 || window.ForceAtlas2 || window.forceAtlas2 ||
-            (window.graphologyLibrary && window.graphologyLibrary.layoutForceAtlas2);
-const iters = DATA.nodes.length > 60 ? 200 : 100;
-if (FA2) {
-  FA2.assign(graph, {
-    iterations: iters,
-    settings: {
-      gravity: 1,
-      scalingRatio: 20,
-      barnesHutOptimize: DATA.nodes.length > 50,
-      slowDown: 3,
-      linLogMode: false,
-    }
-  });
-} else {
-  // Fallback: circular layout so nodes are at least visible.
-  let angle = 0;
-  const step = (2 * Math.PI) / Math.max(DATA.nodes.length, 1);
-  const r = 150 + DATA.nodes.length * 8;
-  graph.forEachNode(n => {
-    graph.setNodeAttribute(n, 'x', r * Math.cos(angle));
-    graph.setNodeAttribute(n, 'y', r * Math.sin(angle));
-    angle += step;
-  });
-}
+// Node x/y positions are pre-computed in Go (hierarchical for DI, package-clustered
+// for the package diagram) and embedded in DATA.nodes[*].attributes.
 
 // ── Sigma renderer ────────────────────────────────────────────────────────────
 const container = document.getElementById('sigma-container');
