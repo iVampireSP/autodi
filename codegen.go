@@ -159,17 +159,27 @@ func NewCodeGen(cfg *Config, graph *Graph, commands []*DiscoveredCommand, module
 	}
 }
 
-// Generate produces the main.go file and a di.mmd dependency diagram.
+// Generate produces the main.go file, a DI dependency diagram, and a package diagram.
 func (cg *CodeGen) Generate() ([]GeneratedFile, error) {
 	f, err := cg.generateMain()
 	if err != nil {
 		return nil, err
 	}
-	diagram := GeneratedFile{
+	diGraph := GeneratedFile{
 		Name:    "dependency-graph.mmd",
 		Content: generateMermaid(cg.graph, cg.commands, cg.cfg),
 	}
-	return []GeneratedFile{f, diagram}, nil
+
+	pkgContent, err := generatePkgDiagram(cg.cfg, cg.moduleRoot)
+	if err != nil {
+		pkgContent = []byte(fmt.Sprintf("%% autodi: package diagram generation failed: %v\n", err))
+	}
+	pkgDiag := GeneratedFile{
+		Name:    "package-diagram.mmd",
+		Content: pkgContent,
+	}
+
+	return []GeneratedFile{f, diGraph, pkgDiag}, nil
 }
 
 // generateMain generates the complete main.go with two-phase DI.
