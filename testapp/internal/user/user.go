@@ -1,6 +1,7 @@
 package user
 
 import (
+	"example.com/testapp/ent"
 	"example.com/testapp/internal/cache"
 	"example.com/testapp/internal/db"
 )
@@ -9,11 +10,12 @@ import (
 type Service struct {
 	db    *db.DB
 	cache *cache.Cache
+	orm   *ent.Client
 }
 
 // NewUser creates a UserService.
-func NewUser(db *db.DB, cache *cache.Cache) *Service {
-	return &Service{db: db, cache: cache}
+func NewUser(db *db.DB, cache *cache.Cache, orm *ent.Client) *Service {
+	return &Service{db: db, cache: cache, orm: orm}
 }
 
 // Create adds a new user.

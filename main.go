@@ -9,14 +9,13 @@
 //
 //  1. Read go.mod → module path
 //  2. Read generate.go → //autodi:app/embed/group annotations
-//  3. Scan internal/ + pkg/ → provider discovery (New* constructors)
-//  4. Build dependency graph + resolve bindings + detect Close/Shutdown/Stop
-//  5. Scan cmd/ → discover commands:
-//     - New*(deps...) returns *T with Command() method + handler methods
-//     - New*() zero-dep returns *T with same pattern
-//  6. For each DI command:
+//  3. Scan internal/ + pkg/ → provider candidates (New* constructors)
+//  4. Scan cmd/ → discover commands (entry points)
+//  5. Filter candidates to reachable providers (BFS from command params)
+//  6. Build dependency graph + resolve bindings + detect Close/Shutdown/Stop
+//  7. For each DI command:
 //     Analyze New* params → trace transitive deps → generate init function
-//  7. Generate main.go with two-phase DI
+//  8. Generate main.go with two-phase DI
 //
 // Usage:
 //
@@ -29,6 +28,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 func main() {
@@ -53,49 +54,35 @@ func main() {
 		fmt.Fprintf(os.Stderr, "autodi: app=%s\n", cfg.AppName)
 	}
 
+	totalStart := time.Now()
+
 	// Load gitignore patterns
 	gitignorePatterns := LoadGitignore(moduleRoot)
 
-	// ── Pass 1: Scan providers and build dependency graph ──
+	// ── Pass 1: Scan provider candidates ──
 
+	t0 := time.Now()
 	scanner := NewScanner(cfg, moduleRoot, gitignorePatterns)
-	providers, err := scanner.Scan()
+	candidates, err := scanner.Scan()
 	if err != nil {
 		log.Fatalf("autodi: scan: %v", err)
 	}
 
 	if *verbose {
-		fmt.Fprintf(os.Stderr, "autodi: discovered %d providers\n", len(providers))
-	}
-
-	graph, errs := BuildGraph(providers, cfg, scanner.PkgIndex, scanner.IfaceTypes)
-	if len(errs) > 0 {
-		for _, e := range errs {
-			fmt.Fprintf(os.Stderr, "autodi: %v\n", e)
-		}
-		os.Exit(1)
-	}
-
-	if errs := graph.VerifyAcyclic(); len(errs) > 0 {
-		for _, e := range errs {
-			fmt.Fprintf(os.Stderr, "autodi: %v\n", e)
-		}
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "autodi: [%s] scan: discovered %d candidates\n", time.Since(t0), len(candidates))
 	}
 
 	// ── Pass 2: Discover commands from cmd/ packages ──
 
+	t1 := time.Now()
 	detector := NewCommandDetector(cfg, moduleRoot)
 	commands, err := detector.Detect()
 	if err != nil {
 		log.Fatalf("autodi: detect commands: %v", err)
 	}
 
-	// Resolve interface bindings for command parameters
-	graph.BindCommandInterfaces(commands)
-
 	if *verbose {
-		fmt.Fprintf(os.Stderr, "autodi: discovered %d commands\n", len(commands))
+		fmt.Fprintf(os.Stderr, "autodi: [%s] detect: discovered %d commands\n", time.Since(t1), len(commands))
 		for _, cmd := range commands {
 			var paramTypes []string
 			for _, p := range cmd.Params {
@@ -114,11 +101,57 @@ func main() {
 			}
 			fmt.Fprintf(os.Stderr, "  [%s] %s: %s.%s(%s) → [%s]\n",
 				kind, cmd.Name, cmd.StructName, cmd.FuncName,
-				joinStrings(paramTypes, ", "), joinStrings(handlers, ", "))
+				strings.Join(paramTypes, ", "), strings.Join(handlers, ", "))
 		}
 	}
 
+	// ── Pass 3: Filter to reachable providers only ──
+
+	t2 := time.Now()
+	providers := FilterReachable(candidates, commands, cfg, scanner.IfaceTypes, *verbose)
+
+	if *verbose {
+		fmt.Fprintf(os.Stderr, "autodi: [%s] reachable: %d candidates → %d providers\n",
+			time.Since(t2), len(candidates), len(providers))
+	}
+
+	// ── Pass 4: Build dependency graph ──
+
+	t3 := time.Now()
+	graph, errs := BuildGraph(providers, cfg, scanner.PkgIndex, scanner.IfaceTypes)
+	if len(errs) > 0 {
+		for _, e := range errs {
+			fmt.Fprintf(os.Stderr, "autodi: %v\n", e)
+		}
+		os.Exit(1)
+	}
+
+	if *verbose {
+		fmt.Fprintf(os.Stderr, "autodi: [%s] build graph\n", time.Since(t3))
+	}
+
+	t4 := time.Now()
+	if errs := graph.VerifyAcyclic(); len(errs) > 0 {
+		for _, e := range errs {
+			fmt.Fprintf(os.Stderr, "autodi: %v\n", e)
+		}
+		os.Exit(1)
+	}
+
+	if *verbose {
+		fmt.Fprintf(os.Stderr, "autodi: [%s] verify acyclic\n", time.Since(t4))
+	}
+
+	// Resolve interface bindings for command parameters
+	t5 := time.Now()
+	graph.BindCommandInterfaces(commands)
+
+	if *verbose {
+		fmt.Fprintf(os.Stderr, "autodi: [%s] bind command interfaces\n", time.Since(t5))
+	}
+
 	// Validate per-command dependencies
+	t6 := time.Now()
 	hasValidationErr := false
 	for _, cmd := range commands {
 		if !cmd.HasDeps() {
@@ -148,15 +181,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *verbose {
+		fmt.Fprintf(os.Stderr, "autodi: [%s] validate commands\n", time.Since(t6))
+	}
+
 	// ── Generate code ──
 
+	t7 := time.Now()
 	gen := NewCodeGen(cfg, graph, commands, moduleRoot)
 	files, err := gen.Generate()
 	if err != nil {
 		log.Fatalf("autodi: generate: %v", err)
 	}
 
+	if *verbose {
+		fmt.Fprintf(os.Stderr, "autodi: [%s] generate code\n", time.Since(t7))
+	}
+
 	// Write or print generated files
+	t8 := time.Now()
 	for _, f := range files {
 		if *dryRun {
 			fmt.Fprintf(os.Stdout, "// === %s ===\n%s\n", f.Name, f.Content)
@@ -171,8 +214,12 @@ func main() {
 		}
 	}
 
+	if *verbose {
+		fmt.Fprintf(os.Stderr, "autodi: [%s] write files\n", time.Since(t8))
+	}
+
 	if !*dryRun {
-		fmt.Fprintf(os.Stderr, "autodi: generated %d files\n", len(files))
+		fmt.Fprintf(os.Stderr, "autodi: generated %d files in %s\n", len(files), time.Since(totalStart))
 	}
 }
 
@@ -197,12 +244,5 @@ func findModuleRoot() (string, error) {
 }
 
 func joinStrings(ss []string, sep string) string {
-	result := ""
-	for i, s := range ss {
-		if i > 0 {
-			result += sep
-		}
-		result += s
-	}
-	return result
+	return strings.Join(ss, sep)
 }

@@ -12,6 +12,7 @@ import (
 	"example.com/testapp/internal/notify"
 	"example.com/testapp/internal/notify/email"
 	"example.com/testapp/internal/notify/slack"
+	"example.com/testapp/internal/orm"
 	"example.com/testapp/internal/user"
 	"github.com/spf13/cobra"
 	"os"
@@ -68,6 +69,8 @@ func main() {
 func initAPI(cmd, top *cobra.Command) (func(), error) {
 	configSvc := config.NewConfig()
 
+	entClient := orm.NewORM(configSvc)
+
 	cacheSvc := cache.NewCache(configSvc)
 
 	dbSvc := db.NewDB(configSvc)
@@ -79,7 +82,7 @@ func initAPI(cmd, top *cobra.Command) (func(), error) {
 
 	mailerSvc := mailer.NewMailer(notifiers)
 
-	userService := user.NewUser(dbSvc, cacheSvc)
+	userService := user.NewUser(dbSvc, cacheSvc, entClient)
 
 	real := apicmd.NewAPI(userService, mailerSvc)
 	tree := real.Command()
@@ -93,6 +96,9 @@ func initAPI(cmd, top *cobra.Command) (func(), error) {
 		}
 		if cacheSvc != nil {
 			cacheSvc.Close()
+		}
+		if entClient != nil {
+			entClient.Close()
 		}
 	}, nil
 }

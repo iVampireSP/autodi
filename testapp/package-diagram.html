@@ -5,14 +5,13 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Package Diagram</title>
 <script src="https://cdn.jsdelivr.net/npm/graphology@0.25.4/dist/graphology.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/graphology-layout-forceatlas2@0.10.1/dist/graphology-layout-forceatlas2.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sigma@2.4.0/build/sigma.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,-apple-system,sans-serif;background:#0f1117;color:#ddd;overflow:hidden}
-#toolbar{position:fixed;top:0;left:0;right:0;height:48px;background:#1a1d27;border-bottom:1px solid #2a2d3a;z-index:10;display:flex;align-items:center;padding:0 16px;gap:12px}
+#toolbar{position:fixed;top:0;left:0;right:0;height:48px;background:#1a1d27;border-bottom:1px solid #2a2d3a;z-index:10;display:flex;align-items:center;padding:0 16px;gap:10px}
 #toolbar h1{font-size:14px;font-weight:600;white-space:nowrap}
-#search{flex:1;max-width:280px;padding:5px 10px;background:#252836;border:1px solid #3a3d4a;border-radius:6px;color:#ddd;font-size:13px;outline:none}
+#search{flex:1;max-width:260px;padding:5px 10px;background:#252836;border:1px solid #3a3d4a;border-radius:6px;color:#ddd;font-size:13px;outline:none}
 #search::placeholder{color:#666}
 #node-count{font-size:11px;color:#666;white-space:nowrap}
 #hint{font-size:11px;color:#555;white-space:nowrap}
@@ -34,7 +33,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f1117;color:#dd
   <h1>Package Diagram</h1>
   <input id="search" type="search" placeholder="Search nodes…">
   <span id="node-count"></span>
-  <span id="hint">click node to highlight · click background to reset</span>
+  <span id="hint">click=node chain · bg-click=reset · search=highlight</span>
 </div>
 <div id="sigma-container"></div>
 <div id="tooltip"></div>
@@ -43,7 +42,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f1117;color:#dd
 (function(){
 'use strict';
 
-const DATA = {"nodes":[{"key":"api_API","attributes":{"color":"#2980b9","label":"API","methods":["Command() Command","Create(Command) error","List(Command) error"],"nodeType":"struct","pkg":"cmd/api","size":8,"usedBy":0}},{"key":"worker_Worker","attributes":{"color":"#2980b9","label":"Worker","methods":["Command() Command","Handle(Command) error"],"nodeType":"struct","pkg":"cmd/worker","size":8,"usedBy":0}},{"key":"cache_Cache","attributes":{"color":"#2980b9","label":"Cache","methods":["Close()","Get(string) string","Set(string, string)"],"nodeType":"struct","pkg":"internal/cache","size":10,"usedBy":1}},{"key":"config_Config","attributes":{"color":"#2980b9","label":"Config","methods":[],"nodeType":"struct","pkg":"internal/config","size":16,"usedBy":4}},{"key":"db_DB","attributes":{"color":"#2980b9","label":"DB","methods":["Close()","Query(string) []string"],"nodeType":"struct","pkg":"internal/db","size":10,"usedBy":1}},{"key":"mailer_Mailer","attributes":{"color":"#2980b9","label":"Mailer","methods":["Notify(string, string, string)"],"nodeType":"struct","pkg":"internal/mailer","size":12,"usedBy":2}},{"key":"notify_Notifier","attributes":{"color":"#e67e22","implCount":2,"label":"Notifier","methods":["Name() string","Send(string, string, string) error"],"nodeType":"interface","pkg":"internal/notify","size":16,"useCount":1,"usedBy":1}},{"key":"notify_email_Email","attributes":{"color":"#2980b9","label":"Email","methods":["Name() string","Send(string, string, string) error"],"nodeType":"struct","pkg":"internal/notify/email","size":8,"usedBy":0}},{"key":"notify_slack_Slack","attributes":{"color":"#2980b9","label":"Slack","methods":["Name() string","Send(string, string, string) error"],"nodeType":"struct","pkg":"internal/notify/slack","size":8,"usedBy":0}},{"key":"user_Service","attributes":{"color":"#2980b9","label":"Service","methods":["Create(string) error","Find(string) string, error"],"nodeType":"struct","pkg":"internal/user","size":10,"usedBy":1}}],"edges":[{"key":"e0","source":"notify_email_Email","target":"notify_Notifier","attributes":{"color":"#e67e22","label":"implements","size":1.5}},{"key":"e1","source":"notify_slack_Slack","target":"notify_Notifier","attributes":{"color":"#e67e22","label":"implements","size":1.5}},{"key":"e2","source":"api_API","target":"user_Service","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e3","source":"api_API","target":"mailer_Mailer","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e4","source":"worker_Worker","target":"mailer_Mailer","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e5","source":"cache_Cache","target":"config_Config","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e6","source":"db_DB","target":"config_Config","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e7","source":"mailer_Mailer","target":"notify_Notifier","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e8","source":"notify_email_Email","target":"config_Config","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e9","source":"notify_slack_Slack","target":"config_Config","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e10","source":"user_Service","target":"db_DB","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e11","source":"user_Service","target":"cache_Cache","attributes":{"color":"#6c757d","label":"depends","size":1.5}}]};
+const DATA = {"nodes":[{"key":"cmd_api_API","attributes":{"color":"#2980b9","label":"API","methods":["Command() Command","Create(Command) error","List(Command) error"],"nodeType":"struct","pkg":"cmd/api","size":8,"usedBy":0,"x":0,"y":0}},{"key":"cmd_worker_Worker","attributes":{"color":"#2980b9","label":"Worker","methods":["Command() Command","Handle(Command) error"],"nodeType":"struct","pkg":"cmd/worker","size":8,"usedBy":0,"x":340,"y":0}},{"key":"ent_Committer","attributes":{"color":"#e67e22","implCount":0,"label":"Committer","methods":["Commit(Context, Tx) error"],"nodeType":"interface","pkg":"ent","size":10,"useCount":0,"usedBy":0,"x":680,"y":0}},{"key":"ent_Rollbacker","attributes":{"color":"#e67e22","implCount":0,"label":"Rollbacker","methods":["Rollback(Context, Tx) error"],"nodeType":"interface","pkg":"ent","size":10,"useCount":0,"usedBy":0,"x":830,"y":0}},{"key":"ent_Client","attributes":{"color":"#2980b9","label":"Client","methods":["BeginTx(Context, TxOptions) Tx, error","Close() error","Debug() Client","Intercept([]Interceptor)","Mutate(Context, Mutation) Value, error","Tx(Context) Tx, error"],"nodeType":"struct","pkg":"ent","size":10,"usedBy":1,"x":680,"y":80}},{"key":"ent_ConstraintError","attributes":{"color":"#2980b9","label":"ConstraintError","methods":["Error() string","Unwrap() error"],"nodeType":"struct","pkg":"ent","size":8,"usedBy":0,"x":830,"y":80}},{"key":"ent_NotFoundError","attributes":{"color":"#2980b9","label":"NotFoundError","methods":["Error() string"],"nodeType":"struct","pkg":"ent","size":8,"usedBy":0,"x":680,"y":160}},{"key":"ent_NotLoadedError","attributes":{"color":"#2980b9","label":"NotLoadedError","methods":["Error() string"],"nodeType":"struct","pkg":"ent","size":8,"usedBy":0,"x":830,"y":160}},{"key":"ent_NotSingularError","attributes":{"color":"#2980b9","label":"NotSingularError","methods":["Error() string"],"nodeType":"struct","pkg":"ent","size":8,"usedBy":0,"x":680,"y":240}},{"key":"ent_Tx","attributes":{"color":"#2980b9","label":"Tx","methods":["Client() Client","Commit() error","OnCommit(CommitHook)","OnRollback(RollbackHook)","Rollback() error"],"nodeType":"struct","pkg":"ent","size":8,"usedBy":0,"x":830,"y":240}},{"key":"ent_User","attributes":{"color":"#2980b9","label":"User","methods":["String() string","Unwrap() User","Update() UserUpdateOne","Value(string) Value, error"],"nodeType":"struct","pkg":"ent","size":8,"usedBy":0,"x":680,"y":320}},{"key":"ent_UserClient","attributes":{"color":"#2980b9","label":"UserClient","methods":["Create() UserCreate","CreateBulk([]UserCreate) UserCreateBulk","Delete() UserDelete","DeleteOne(User) UserDeleteOne","DeleteOneID(int) UserDeleteOne","Get(Context, int) User, error"],"nodeType":"struct","pkg":"ent","size":12,"usedBy":2,"x":830,"y":320}},{"key":"ent_UserCreate","attributes":{"color":"#2980b9","label":"UserCreate","methods":["Exec(Context) error","ExecX(Context)","Mutation() UserMutation","Save(Context) User, error","SaveX(Context) User","SetEmail(string) UserCreate"],"nodeType":"struct","pkg":"ent","size":8,"usedBy":0,"x":680,"y":400}},{"key":"ent_UserCreateBulk","attributes":{"color":"#2980b9","label":"UserCreateBulk","methods":["Exec(Context) error","ExecX(Context)","Save(Context) []User, error","SaveX(Context) []User"],"nodeType":"struct","pkg":"ent","size":8,"usedBy":0,"x":830,"y":400}},{"key":"ent_UserDelete","attributes":{"color":"#2980b9","label":"UserDelete","methods":["Exec(Context) int, error","ExecX(Context) int","Where([]User) UserDelete"],"nodeType":"struct","pkg":"ent","size":8,"usedBy":0,"x":680,"y":480}},{"key":"ent_UserDeleteOne","attributes":{"color":"#2980b9","label":"UserDeleteOne","methods":["Exec(Context) error","ExecX(Context)","Where([]User) UserDeleteOne"],"nodeType":"struct","pkg":"ent","size":8,"usedBy":0,"x":830,"y":480}},{"key":"ent_UserGroupBy","attributes":{"color":"#2980b9","label":"UserGroupBy","methods":["Aggregate([]AggregateFunc) UserGroupBy","Bool(Context) bool, error","BoolX(Context) bool","Bools(Context) []bool, error","BoolsX(Context) []bool","Float64(Context) float64, error"],"nodeType":"struct","pkg":"ent","size":8,"usedBy":0,"x":680,"y":560}},{"key":"ent_UserMutation","attributes":{"color":"#2980b9","label":"UserMutation","methods":["AddField(string, Value) error","AddedEdges() []string","AddedField(string) Value, bool","AddedFields() []string","AddedIDs(string) []Value","ClearEdge(string) error"],"nodeType":"struct","pkg":"ent","size":8,"usedBy":0,"x":830,"y":560}},{"key":"ent_UserQuery","attributes":{"color":"#2980b9","label":"UserQuery","methods":["Aggregate([]AggregateFunc) UserSelect","All(Context) []User, error","AllX(Context) []User","Clone() UserQuery","Count(Context) int, error","CountX(Context) int"],"nodeType":"struct","pkg":"ent","size":10,"usedBy":1,"x":680,"y":640}},{"key":"ent_UserSelect","attributes":{"color":"#2980b9","label":"UserSelect","methods":["Aggregate([]AggregateFunc) UserSelect","All(Context) []User, error","AllX(Context) []User","Bool(Context) bool, error","BoolX(Context) bool","Bools(Context) []bool, error"],"nodeType":"struct","pkg":"ent","size":8,"usedBy":0,"x":830,"y":640}},{"key":"ent_UserUpdate","attributes":{"color":"#2980b9","label":"UserUpdate","methods":["Exec(Context) error","ExecX(Context)","Mutation() UserMutation","Save(Context) int, error","SaveX(Context) int","SetEmail(string) UserUpdate"],"nodeType":"struct","pkg":"ent","size":8,"usedBy":0,"x":680,"y":720}},{"key":"ent_UserUpdateOne","attributes":{"color":"#2980b9","label":"UserUpdateOne","methods":["Exec(Context) error","ExecX(Context)","Mutation() UserMutation","Save(Context) User, error","SaveX(Context) User","Select(string, []string) UserUpdateOne"],"nodeType":"struct","pkg":"ent","size":8,"usedBy":0,"x":830,"y":720}},{"key":"ent_ValidationError","attributes":{"color":"#2980b9","label":"ValidationError","methods":["Error() string","Unwrap() error"],"nodeType":"struct","pkg":"ent","size":8,"usedBy":0,"x":680,"y":800}},{"key":"ent_enttest_TestingT","attributes":{"color":"#e67e22","implCount":0,"label":"TestingT","methods":["Error([]any)","FailNow()"],"nodeType":"interface","pkg":"ent/enttest","size":10,"useCount":0,"usedBy":0,"x":1020,"y":0}},{"key":"ent_hook_Chain","attributes":{"color":"#2980b9","label":"Chain","methods":["Append([]Hook) Chain","Extend(Chain) Chain","Hook() Hook"],"nodeType":"struct","pkg":"ent/hook","size":8,"usedBy":0,"x":0,"y":280}},{"key":"ent_migrate_Schema","attributes":{"color":"#2980b9","label":"Schema","methods":["Create(Context, []MigrateOption) error","WriteTo(Context, Writer, []MigrateOption) error"],"nodeType":"struct","pkg":"ent/migrate","size":10,"usedBy":1,"x":340,"y":280}},{"key":"ent_schema_User","attributes":{"color":"#2980b9","label":"User","methods":["Annotations() []Annotation","Config() Config","Edges() []Edge","Fields() []Field","Hooks() []Hook","Indexes() []Index"],"nodeType":"struct","pkg":"ent/schema","size":8,"usedBy":0,"x":680,"y":280}},{"key":"internal_cache_Cache","attributes":{"color":"#2980b9","label":"Cache","methods":["Close()","Get(string) string","Set(string, string)"],"nodeType":"struct","pkg":"internal/cache","size":10,"usedBy":1,"x":1020,"y":280}},{"key":"internal_config_Config","attributes":{"color":"#2980b9","label":"Config","methods":[],"nodeType":"struct","pkg":"internal/config","size":16,"usedBy":4,"x":0,"y":560}},{"key":"internal_db_DB","attributes":{"color":"#2980b9","label":"DB","methods":["Close()","Query(string) []string"],"nodeType":"struct","pkg":"internal/db","size":10,"usedBy":1,"x":340,"y":560}},{"key":"internal_mailer_Mailer","attributes":{"color":"#2980b9","label":"Mailer","methods":["Notify(string, string, string)"],"nodeType":"struct","pkg":"internal/mailer","size":12,"usedBy":2,"x":680,"y":560}},{"key":"internal_mailer_TwoFactorDisabledMail","attributes":{"color":"#2980b9","label":"TwoFactorDisabledMail","methods":[],"nodeType":"struct","pkg":"internal/mailer","size":8,"usedBy":0,"x":830,"y":560}},{"key":"internal_notify_Notifier","attributes":{"color":"#e67e22","implCount":2,"label":"Notifier","methods":["Name() string","Send(string, string, string) error"],"nodeType":"interface","pkg":"internal/notify","size":16,"useCount":1,"usedBy":1,"x":1020,"y":560}},{"key":"internal_notify_email_Email","attributes":{"color":"#2980b9","label":"Email","methods":["Name() string","Send(string, string, string) error"],"nodeType":"struct","pkg":"internal/notify/email","size":8,"usedBy":0,"x":0,"y":840}},{"key":"internal_notify_slack_Slack","attributes":{"color":"#2980b9","label":"Slack","methods":["Name() string","Send(string, string, string) error"],"nodeType":"struct","pkg":"internal/notify/slack","size":8,"usedBy":0,"x":340,"y":840}},{"key":"internal_user_Service","attributes":{"color":"#2980b9","label":"Service","methods":["Create(string) error","Find(string) string, error"],"nodeType":"struct","pkg":"internal/user","size":10,"usedBy":1,"x":680,"y":840}}],"edges":[{"key":"e0","source":"internal_notify_email_Email","target":"internal_notify_Notifier","attributes":{"color":"#e67e22","label":"implements","size":1.5}},{"key":"e1","source":"internal_notify_slack_Slack","target":"internal_notify_Notifier","attributes":{"color":"#e67e22","label":"implements","size":1.5}},{"key":"e2","source":"cmd_api_API","target":"internal_user_Service","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e3","source":"cmd_api_API","target":"internal_mailer_Mailer","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e4","source":"cmd_worker_Worker","target":"internal_mailer_Mailer","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e5","source":"internal_cache_Cache","target":"internal_config_Config","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e6","source":"internal_db_DB","target":"internal_config_Config","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e7","source":"internal_mailer_Mailer","target":"internal_notify_Notifier","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e8","source":"internal_notify_email_Email","target":"internal_config_Config","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e9","source":"internal_notify_slack_Slack","target":"internal_config_Config","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e10","source":"internal_user_Service","target":"internal_db_DB","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e11","source":"internal_user_Service","target":"internal_cache_Cache","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e12","source":"internal_user_Service","target":"ent_Client","attributes":{"color":"#6c757d","label":"depends","size":1.5}},{"key":"e13","source":"ent_Client","target":"ent_migrate_Schema","attributes":{"color":"#95a5a6","label":"field","size":1.5}},{"key":"e14","source":"ent_Client","target":"ent_UserClient","attributes":{"color":"#95a5a6","label":"field","size":1.5}},{"key":"e15","source":"ent_Tx","target":"ent_UserClient","attributes":{"color":"#95a5a6","label":"field","size":1.5}},{"key":"e16","source":"ent_UserSelect","target":"ent_UserQuery","attributes":{"color":"#95a5a6","label":"field","size":1.5}}]};
 
 function buildTooltip(node, a) {
   const typeLabel = {struct:'Struct',interface:'Interface',decorator:'Decorator'};
@@ -68,54 +67,142 @@ DATA.edges.forEach(e => {
   try { graph.addEdge(e.source, e.target, e.attributes); } catch(_) {}
 });
 
-// ── ForceAtlas2 initial layout ────────────────────────────────────────────────
-// CDN UMD global name varies between versions; try all known names.
-const FA2 = window.graphologyLayoutForceAtlas2 || window.ForceAtlas2 || window.forceAtlas2 ||
-            (window.graphologyLibrary && window.graphologyLibrary.layoutForceAtlas2);
-const iters = DATA.nodes.length > 60 ? 200 : 100;
-if (FA2) {
-  FA2.assign(graph, {
-    iterations: iters,
-    settings: {
-      gravity: 1,
-      scalingRatio: 20,
-      barnesHutOptimize: DATA.nodes.length > 50,
-      slowDown: 3,
-      linLogMode: false,
-    }
-  });
-} else {
-  // Fallback: circular layout so nodes are at least visible.
-  let angle = 0;
-  const step = (2 * Math.PI) / Math.max(DATA.nodes.length, 1);
-  const r = 150 + DATA.nodes.length * 8;
-  graph.forEachNode(n => {
-    graph.setNodeAttribute(n, 'x', r * Math.cos(angle));
-    graph.setNodeAttribute(n, 'y', r * Math.sin(angle));
-    angle += step;
-  });
-}
+// Node x/y positions are pre-computed in Go (hierarchical for DI, package-clustered
+// for the package diagram) and embedded in DATA.nodes[*].attributes.
 
 // ── Sigma renderer ────────────────────────────────────────────────────────────
 const container = document.getElementById('sigma-container');
 const renderer = new Sigma(graph, container, {
   defaultEdgeType: 'arrow',
-  renderEdgeLabels: true,
+  renderEdgeLabels: false,
   labelFont: 'system-ui, sans-serif',
   labelSize: 12,
   labelWeight: '500',
   labelColor: {color: '#c8c8c8'},
   edgeLabelFont: 'system-ui, sans-serif',
   edgeLabelSize: 9,
-  edgeLabelColor: {color: '#666'},
-  minCameraRatio: 0.05,
-  maxCameraRatio: 20,
-  labelThreshold: 0.5,
+	edgeLabelColor: {color: '#666'},
+	minCameraRatio: 0.02,
+	maxCameraRatio: 200,
+	labelThreshold: 1.2,
 });
 
-// ── Node count ────────────────────────────────────────────────────────────────
+// ── Full graph interaction (no filtering) ─────────────────────────────────────
+const origNodeColors = {};
+const origNodeLabels = {};
+const origEdgeColors = {};
+const origEdgeSizes  = {};
+
+graph.forEachNode((n, a) => {
+  origNodeColors[n] = a.color;
+  origNodeLabels[n] = a.label;
+  graph.setNodeAttribute(n, 'hidden', false);
+});
+graph.forEachEdge((e, a) => {
+  origEdgeColors[e] = a.color;
+  origEdgeSizes[e]  = a.size || 1.5;
+  graph.setEdgeAttribute(e, 'hidden', false);
+});
+
 document.getElementById('node-count').textContent =
   DATA.nodes.length + ' nodes · ' + DATA.edges.length + ' edges';
+
+const DIM_NODE_COLOR = '#1f2433';
+const DIM_EDGE_COLOR = '#2a3042';
+
+let activeNode = null;
+let activeQuery = '';
+
+function resetGraphStyles() {
+  graph.forEachNode(n => {
+    graph.setNodeAttribute(n, 'color', origNodeColors[n]);
+    graph.setNodeAttribute(n, 'label', origNodeLabels[n]);
+  });
+  graph.forEachEdge(e => {
+    graph.setEdgeAttribute(e, 'color', origEdgeColors[e]);
+    graph.setEdgeAttribute(e, 'size', origEdgeSizes[e]);
+  });
+}
+
+function collectDirectedChain(seed) {
+  const nodes = new Set([seed]);
+  const edgePairs = new Set();
+
+  // Upstream dependencies (dep -> consumer)
+  const upQueue = [seed];
+  for (let i = 0; i < upQueue.length; i++) {
+    const cur = upQueue[i];
+    graph.inNeighbors(cur).forEach(dep => {
+      edgePairs.add(dep + '|' + cur);
+      if (!nodes.has(dep)) {
+        nodes.add(dep);
+        upQueue.push(dep);
+      }
+    });
+  }
+
+  // Downstream consumers (producer -> consumer)
+  const downQueue = [seed];
+  for (let i = 0; i < downQueue.length; i++) {
+    const cur = downQueue[i];
+    graph.outNeighbors(cur).forEach(cons => {
+      edgePairs.add(cur + '|' + cons);
+      if (!nodes.has(cons)) {
+        nodes.add(cons);
+        downQueue.push(cons);
+      }
+    });
+  }
+
+  return {nodes, edgePairs};
+}
+
+function applyHighlight(nodes, edgePairs) {
+  graph.forEachNode(n => {
+    const on = nodes.has(n);
+    graph.setNodeAttribute(n, 'color', on ? origNodeColors[n] : DIM_NODE_COLOR);
+    graph.setNodeAttribute(n, 'label', on ? origNodeLabels[n] : '');
+  });
+
+  graph.forEachEdge((e, _a, src, tgt) => {
+    const on = edgePairs.has(src + '|' + tgt);
+    graph.setEdgeAttribute(e, 'color', on ? origEdgeColors[e] : DIM_EDGE_COLOR);
+    graph.setEdgeAttribute(e, 'size', on ? Math.max(2.2, (origEdgeSizes[e] || 1.5) * 1.5) : 0.8);
+  });
+}
+
+function applySearch(query) {
+  if (!query) {
+    resetGraphStyles();
+    return;
+  }
+
+  const hits = new Set();
+  graph.forEachNode((n, a) => {
+    if (String(origNodeLabels[n] || '').toLowerCase().includes(query) ||
+        (a.pkg && a.pkg.toLowerCase().includes(query))) {
+      hits.add(n);
+    }
+  });
+
+  if (hits.size === 0) {
+    resetGraphStyles();
+    return;
+  }
+
+  // Search mode: highlight matching nodes only.
+  applyHighlight(hits, new Set());
+}
+
+function renderState() {
+  if (activeNode && graph.hasNode(activeNode)) {
+    const chain = collectDirectedChain(activeNode);
+    applyHighlight(chain.nodes, chain.edgePairs);
+  } else {
+    applySearch(activeQuery);
+  }
+  renderer.refresh();
+}
 
 // ── Tooltip ───────────────────────────────────────────────────────────────────
 const tooltip = document.getElementById('tooltip');
@@ -136,46 +223,25 @@ renderer.on('enterNode', ({node}) => {
 });
 renderer.on('leaveNode', () => { tooltip.style.display = 'none'; });
 
-// ── Click to highlight neighbours ─────────────────────────────────────────────
-const origColors = {};
-graph.forEachNode((n, attrs) => { origColors[n] = attrs.color; });
-let selected = null;
-
+// ── Click: highlight full dependency/call chain ────────────────────────────────
 renderer.on('clickNode', ({node}) => {
-  if (selected === node) {
-    selected = null;
-    graph.forEachNode(n => graph.setNodeAttribute(n, 'color', origColors[n]));
-  } else {
-    selected = node;
-    const nbrs = new Set(graph.neighbors(node));
-    nbrs.add(node);
-    graph.forEachNode(n => {
-      graph.setNodeAttribute(n, 'color', nbrs.has(n) ? origColors[n] : '#222232');
-    });
-  }
-  renderer.refresh();
+  activeNode = node;
+  renderState();
 });
 renderer.on('clickStage', () => {
-  if (selected) {
-    selected = null;
-    graph.forEachNode(n => graph.setNodeAttribute(n, 'color', origColors[n]));
-    renderer.refresh();
-  }
+  activeNode = null;
+  renderState();
 });
 
-// ── Search ─────────────────────────────────────────────────────────────────────
+// ── Search: highlight matching nodes ───────────────────────────────────────────
 document.getElementById('search').addEventListener('input', evt => {
-  const q = evt.target.value.toLowerCase().trim();
-  if (!q) {
-    graph.forEachNode(n => graph.setNodeAttribute(n, 'color', origColors[n]));
-  } else {
-    graph.forEachNode((n, attrs) => {
-      const match = attrs.label.toLowerCase().includes(q);
-      graph.setNodeAttribute(n, 'color', match ? origColors[n] : '#222232');
-    });
-  }
-  renderer.refresh();
+  activeNode = null;
+  activeQuery = evt.target.value.toLowerCase().trim();
+  renderState();
 });
+
+// Initial render.
+renderState();
 
 })();
 </script>
