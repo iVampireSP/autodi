@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"go/format"
+	"go/types"
 	"strings"
 )
 
@@ -399,6 +400,10 @@ func (cg *CodeGen) generateInitFunc(buf *bytes.Buffer, cmd *DiscoveredCommand, c
 	varMap := make(map[string]string) // typeStr → local var name
 	usedVars := make(map[string]bool)
 
+	// Register singleton provider imports up front so local variable names can
+	// avoid colliding with import qualifiers that appear later.
+	cg.registerProviderImports(providers)
+
 	// Build set of "consumed" types — types actually referenced as params
 	consumedTypes := make(map[string]bool)
 	for _, p := range providers {
@@ -470,20 +475,23 @@ func (cg *CodeGen) generateInitFunc(buf *bytes.Buffer, cmd *DiscoveredCommand, c
 		key := p.PkgPath + "." + p.FuncName
 		if aps, ok := deepAutoMap[key]; ok {
 			for _, ap := range aps {
+				cg.registerProviderImports(ap.providers)
+
 				varName := deriveSliceVarName(ap.elemType)
+				if cg.imports.IsQualifier(varName) {
+					varName = varName + "List"
+				}
 				if usedVars[varName] {
 					varName = varName + "Auto"
 				}
-				usedVars[varName] = true
+				varName = cg.uniqueLocalVar(varName, usedVars)
 
 				ifaceType := cg.shortType(ap.elemType)
-				fmt.Fprintf(buf, "\t%s := []%s{\n", varName, ifaceType)
-				for _, cp := range ap.providers {
-					qualifier := cg.qualifyFunc(cp)
-					args := cg.buildLocalArgs(cp, varMap)
-					fmt.Fprintf(buf, "\t\t%s(%s),\n", qualifier, strings.Join(args, ", "))
+				fmt.Fprintf(buf, "\t%s := make([]%s, 0, %d)\n", varName, ifaceType, len(ap.providers))
+				if err := cg.writeSliceProviderCalls(buf, varName, ap.elemType, ap.providers, varMap, usedVars); err != nil {
+					return err
 				}
-				buf.WriteString("\t}\n\n")
+				buf.WriteString("\n")
 
 				// Register in varMap so the provider call can reference it
 				varMap[p.Params[ap.idx].TypeStr] = varName
@@ -514,21 +522,24 @@ func (cg *CodeGen) generateInitFunc(buf *bytes.Buffer, cmd *DiscoveredCommand, c
 			continue
 		}
 
+		cg.registerProviderImports(groupProviders)
+
 		groupCfg := cg.cfg.Groups[groupName]
 		groupVarName := localVarName(GroupFieldName(groupName))
+		if cg.imports.IsQualifier(groupVarName) {
+			groupVarName = groupVarName + "List"
+		}
 		if usedVars[groupVarName] {
 			groupVarName = groupVarName + "Group"
 		}
-		usedVars[groupVarName] = true
+		groupVarName = cg.uniqueLocalVar(groupVarName, usedVars)
 
 		ifaceType := cg.qualifyType(groupCfg.Interface, "")
-		fmt.Fprintf(buf, "\t%s := []%s{\n", groupVarName, ifaceType)
-		for _, p := range groupProviders {
-			qualifier := cg.qualifyFunc(p)
-			args := cg.buildLocalArgs(p, varMap)
-			fmt.Fprintf(buf, "\t\t%s(%s),\n", qualifier, strings.Join(args, ", "))
+		fmt.Fprintf(buf, "\t%s := make([]%s, 0, %d)\n", groupVarName, ifaceType, len(groupProviders))
+		if err := cg.writeSliceProviderCalls(buf, groupVarName, groupCfg.Interface, groupProviders, varMap, usedVars); err != nil {
+			return err
 		}
-		buf.WriteString("\t}\n\n")
+		buf.WriteString("\n")
 
 		// Register the slice in varMap for the NewCommand call
 		varMap[cmd.Params[gp.idx].TypeStr] = groupVarName
@@ -536,20 +547,23 @@ func (cg *CodeGen) generateInitFunc(buf *bytes.Buffer, cmd *DiscoveredCommand, c
 
 	// Build auto-collected slices
 	for _, ap := range autoParams {
+		cg.registerProviderImports(ap.providers)
+
 		varName := deriveSliceVarName(ap.elemType)
+		if cg.imports.IsQualifier(varName) {
+			varName = varName + "List"
+		}
 		if usedVars[varName] {
 			varName = varName + "Auto"
 		}
-		usedVars[varName] = true
+		varName = cg.uniqueLocalVar(varName, usedVars)
 
 		ifaceType := cg.shortType(ap.elemType)
-		fmt.Fprintf(buf, "\t%s := []%s{\n", varName, ifaceType)
-		for _, p := range ap.providers {
-			qualifier := cg.qualifyFunc(p)
-			args := cg.buildLocalArgs(p, varMap)
-			fmt.Fprintf(buf, "\t\t%s(%s),\n", qualifier, strings.Join(args, ", "))
+		fmt.Fprintf(buf, "\t%s := make([]%s, 0, %d)\n", varName, ifaceType, len(ap.providers))
+		if err := cg.writeSliceProviderCalls(buf, varName, ap.elemType, ap.providers, varMap, usedVars); err != nil {
+			return err
 		}
-		buf.WriteString("\t}\n\n")
+		buf.WriteString("\n")
 
 		varMap[cmd.Params[ap.idx].TypeStr] = varName
 	}
@@ -680,6 +694,120 @@ func (cg *CodeGen) writeLocalProviderCall(buf *bytes.Buffer, p *Provider, varMap
 			fmt.Fprintf(buf, "\t%s(%s)\n", qualifier, strings.Join(args, ", "))
 		}
 	}
+}
+
+// registerProviderImports pre-registers provider packages so local variable name
+// generation can avoid import qualifier collisions.
+func (cg *CodeGen) registerProviderImports(providers []*Provider) {
+	for _, p := range providers {
+		_ = cg.qualifyFunc(p)
+	}
+}
+
+// uniqueLocalVar returns a unique local variable name that does not collide with
+// existing locals or import qualifiers.
+func (cg *CodeGen) uniqueLocalVar(base string, usedVars map[string]bool) string {
+	if base == "" {
+		base = "value"
+	}
+
+	name := base
+	for i := 2; usedVars[name] || cg.imports.IsQualifier(name); i++ {
+		name = fmt.Sprintf("%s%d", base, i)
+	}
+	usedVars[name] = true
+	return name
+}
+
+// matchingSliceReturnIndexes returns provider return indexes that should be
+// added to a []elemTypeStr slice.
+func (cg *CodeGen) matchingSliceReturnIndexes(p *Provider, elemTypeStr string) ([]int, error) {
+	if len(p.Returns) == 0 {
+		return nil, fmt.Errorf("provider %s.%s has no return values", p.PkgName, p.FuncName)
+	}
+
+	resolvedElem := cg.graph.resolveConfigType(elemTypeStr)
+	iface := cg.graph.findIfaceType(resolvedElem)
+
+	var matches []int
+	for i, ret := range p.Returns {
+		if ret.TypeStr == resolvedElem || cg.graph.resolveType(ret.TypeStr) == resolvedElem {
+			matches = append(matches, i)
+			continue
+		}
+		if iface != nil {
+			if cg.graph.cachedImplements(ret.Type, ret.TypeStr, iface, resolvedElem) {
+				matches = append(matches, i)
+				continue
+			}
+			if _, isPtr := ret.Type.(*types.Pointer); !isPtr {
+				ptrType := types.NewPointer(ret.Type)
+				ptrStr := "*" + ret.TypeStr
+				if cg.graph.cachedImplements(ptrType, ptrStr, iface, resolvedElem) {
+					matches = append(matches, i)
+				}
+			}
+		}
+	}
+
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("provider %s.%s has no return matching %s", p.PkgName, p.FuncName, toShortTypeName(resolvedElem))
+	}
+	return matches, nil
+}
+
+// writeSliceProviderCalls emits provider calls that append the selected return
+// value into the target slice variable.
+func (cg *CodeGen) writeSliceProviderCalls(buf *bytes.Buffer, sliceVarName, elemTypeStr string, providers []*Provider, varMap map[string]string, usedVars map[string]bool) error {
+	for _, p := range providers {
+		matchIdxs, err := cg.matchingSliceReturnIndexes(p, elemTypeStr)
+		if err != nil {
+			return err
+		}
+
+		qualifier := cg.qualifyFunc(p)
+		args := cg.buildLocalArgs(p, varMap)
+
+		if len(p.Returns) == 1 && !p.HasError && len(matchIdxs) == 1 && matchIdxs[0] == 0 {
+			fmt.Fprintf(buf, "\t%s = append(%s, %s(%s))\n", sliceVarName, sliceVarName, qualifier, strings.Join(args, ", "))
+			continue
+		}
+
+		selectedVars := make(map[int]string, len(matchIdxs))
+		for _, idx := range matchIdxs {
+			selectedType := p.Returns[idx].TypeStr
+			selectedVar := localVarName(FieldName(selectedType))
+			if cg.imports.IsQualifier(selectedVar) {
+				selectedVar = selectedVar + "Val"
+			}
+			selectedVars[idx] = cg.uniqueLocalVar(selectedVar, usedVars)
+		}
+
+		lhs := make([]string, 0, len(p.Returns)+1)
+		for i := range p.Returns {
+			if selectedVar, ok := selectedVars[i]; ok {
+				lhs = append(lhs, selectedVar)
+				continue
+			}
+			lhs = append(lhs, "_")
+		}
+
+		if p.HasError {
+			lhs = append(lhs, "err")
+			fmt.Fprintf(buf, "\t%s := %s(%s)\n", strings.Join(lhs, ", "), qualifier, strings.Join(args, ", "))
+			fmt.Fprintf(buf, "\tif err != nil {\n")
+			fmt.Fprintf(buf, "\t\treturn nil, fmt.Errorf(\"%s.%s: %%w\", err)\n", p.PkgName, p.FuncName)
+			fmt.Fprintf(buf, "\t}\n")
+		} else {
+			fmt.Fprintf(buf, "\t%s := %s(%s)\n", strings.Join(lhs, ", "), qualifier, strings.Join(args, ", "))
+		}
+
+		for _, idx := range matchIdxs {
+			fmt.Fprintf(buf, "\t%s = append(%s, %s)\n", sliceVarName, sliceVarName, selectedVars[idx])
+		}
+	}
+
+	return nil
 }
 
 // buildLocalArgs constructs the argument list for a provider call using local vars.
