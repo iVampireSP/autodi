@@ -15,18 +15,21 @@ func BuildConfig(moduleRoot string) (*Config, error) {
 		return nil, err
 	}
 
-	appName, appShort, appLong, groups, err := parseGenerateFile(moduleRoot)
+	appName, appShort, appLong, groups, excludes, err := parseGenerateFile(moduleRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	gitignore := LoadGitignore(moduleRoot)
+	scan, err := discoverScanPaths(moduleRoot, gitignore)
 	if err != nil {
 		return nil, err
 	}
 
 	cfg := &Config{
-		Module: module,
-		Scan: []string{
-			"internal/...",
-			"pkg/...",
-		},
-		Exclude:  []string{},
+		Module:   module,
+		Scan:     scan,
+		Exclude:  excludes,
 		Output:   ".",
 		Bindings: make(map[string][]string),
 		Groups:   groups,
@@ -35,6 +38,37 @@ func BuildConfig(moduleRoot string) (*Config, error) {
 		AppLong:  appLong,
 	}
 	return cfg, nil
+}
+
+// discoverScanPaths enumerates top-level directories in the module root and
+// returns them as scan patterns (e.g. "internal/..."), excluding:
+//   - cmd/       — entry-point packages, handled by EntryDetector
+//   - dot dirs   — hidden (.git, .claude, …)
+//   - gitignored directories
+func discoverScanPaths(root string, gitignore []GitignorePattern) ([]string, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, fmt.Errorf("read module root: %w", err)
+	}
+
+	var paths []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if name == "cmd" {
+			continue
+		}
+		if IsGitignored(name, gitignore) {
+			continue
+		}
+		paths = append(paths, name+"/...")
+	}
+	return paths, nil
 }
 
 func parseModulePath(root string) (string, error) {
@@ -54,7 +88,7 @@ func parseModulePath(root string) (string, error) {
 	return "", fmt.Errorf("module directive not found in go.mod")
 }
 
-func parseGenerateFile(root string) (appName, appShort, appLong string, groups map[string]GroupConfig, err error) {
+func parseGenerateFile(root string) (appName, appShort, appLong string, groups map[string]GroupConfig, excludes []string, err error) {
 	path := filepath.Join(root, "generate.go")
 	data, readErr := os.ReadFile(path)
 	if readErr != nil {
@@ -100,6 +134,12 @@ func parseGenerateFile(root string) (appName, appShort, appLong string, groups m
 					Interface: ifaceType,
 					Paths:     []string{groupPath},
 				}
+			}
+
+		case "exclude":
+			// //autodi:exclude ent/...
+			if len(parts) >= 2 {
+				excludes = append(excludes, parts[1])
 			}
 		}
 	}
