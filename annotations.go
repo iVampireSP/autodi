@@ -8,9 +8,10 @@ import (
 // Annotation types
 const (
 	AnnotBind     = "bind"     // //autodi:bind InterfaceName
-	AnnotIgnore   = "ignore"   // //autodi:ignore
+	AnnotIgnore   = "ignore"   // //autodi:ignore [importpath.Func] — on a provider, or cmd-side targeting another provider
 	AnnotInvoke   = "invoke"   // //autodi:invoke
 	AnnotOptional = "optional" // //autodi:optional ParamType
+	AnnotInject   = "inject"   // //autodi:inject — marks a cmd's root assembler; autodi generates Inject()
 )
 
 // Annotation represents a parsed //autodi: directive.
@@ -45,7 +46,7 @@ func ParseAnnotations(fn *ast.FuncDecl) []Annotation {
 		}
 
 		switch kind {
-		case AnnotBind, AnnotIgnore, AnnotInvoke, AnnotOptional:
+		case AnnotBind, AnnotIgnore, AnnotInvoke, AnnotOptional, AnnotInject:
 			annotations = append(annotations, Annotation{Kind: kind, Value: value})
 		}
 	}

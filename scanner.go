@@ -92,11 +92,62 @@ func (s *Scanner) Scan() ([]*Provider, error) {
 	return providers, nil
 }
 
+// ScanSubtree scans a single cmd's private subtree (e.g. "cmd/admin-api") for
+// provider candidates — the handlers, sub-routers, etc. that belong only to that
+// binary. It is tolerant of package load errors: the cmd's own `package main`
+// won't type-check before gen.go exists (it references the not-yet-generated
+// Inject), but its internal/ packages type-check fine on their own, and the main
+// package contributes no exported New* anyway. Results merge into PkgIndex and
+// IfaceTypes (so the binary's interfaces, e.g. route.Route, are AutoCollectable).
+func (s *Scanner) ScanSubtree(relDir string) ([]*Provider, error) {
+	pattern := s.cfg.Module + "/" + relDir + "/..."
+	cfg := &packages.Config{
+		Mode: packages.NeedTypes | packages.NeedTypesInfo |
+			packages.NeedSyntax | packages.NeedName |
+			packages.NeedFiles | packages.NeedImports,
+		Dir: s.moduleRoot,
+	}
+	pkgs, err := packages.Load(cfg, pattern)
+	if err != nil {
+		return nil, fmt.Errorf("load %s: %w", pattern, err)
+	}
+	if len(pkgs) > 0 {
+		s.fset = pkgs[0].Fset
+	}
+
+	if s.PkgIndex == nil {
+		s.PkgIndex = make(map[string]string)
+	}
+	for _, pkg := range pkgs {
+		if pkg.Name != "" {
+			s.PkgIndex[pkg.Name] = pkg.PkgPath
+		}
+		for _, imp := range pkg.Imports {
+			s.PkgIndex[imp.Name] = imp.PkgPath
+		}
+	}
+	s.buildIfaceTypes(pkgs)
+
+	var providers []*Provider
+	for _, pkg := range pkgs {
+		if pkg.Types == nil || len(pkg.Syntax) == 0 {
+			continue // unloadable; skip (tolerant)
+		}
+		if s.shouldExclude(pkg.PkgPath) {
+			continue
+		}
+		providers = append(providers, s.extractProviders(pkg)...)
+	}
+	return providers, nil
+}
+
 // buildIfaceTypes extracts all exported interface types from loaded packages
 // and their in-module imports. This allows AutoCollect to find interface types
 // that aren't directly used in any provider's signature.
 func (s *Scanner) buildIfaceTypes(pkgs []*packages.Package) {
-	s.IfaceTypes = make(map[string]*types.Interface)
+	if s.IfaceTypes == nil {
+		s.IfaceTypes = make(map[string]*types.Interface)
+	}
 	visited := make(map[string]bool)
 
 	var extract func(pkg *packages.Package)
@@ -211,12 +262,12 @@ func (s *Scanner) extractProviders(pkg *packages.Package) []*Provider {
 			}
 			sig := funcObj.Type().(*types.Signature)
 
-			returns, hasError := s.extractReturns(sig)
+			returns, hasError := extractReturns(sig)
 			if len(returns) == 0 {
 				continue
 			}
 
-			params := s.extractParams(sig, annotations)
+			params := extractParams(sig, annotations)
 
 			provider := &Provider{
 				FuncName:    fn.Name.Name,
@@ -336,11 +387,11 @@ func (s *Scanner) buildProvider(pkg *packages.Package, fn *ast.FuncDecl, annotat
 		return nil
 	}
 	sig := funcObj.Type().(*types.Signature)
-	returns, hasError := s.extractReturns(sig)
+	returns, hasError := extractReturns(sig)
 	if len(returns) == 0 {
 		return nil
 	}
-	params := s.extractParams(sig, annotations)
+	params := extractParams(sig, annotations)
 
 	return &Provider{
 		FuncName:    fn.Name.Name,
@@ -356,7 +407,7 @@ func (s *Scanner) buildProvider(pkg *packages.Package, fn *ast.FuncDecl, annotat
 }
 
 // extractReturns parses return types, separating error from provided types.
-func (s *Scanner) extractReturns(sig *types.Signature) ([]TypeRef, bool) {
+func extractReturns(sig *types.Signature) ([]TypeRef, bool) {
 	results := sig.Results()
 	if results.Len() == 0 {
 		return nil, false
@@ -386,7 +437,7 @@ func (s *Scanner) extractReturns(sig *types.Signature) ([]TypeRef, bool) {
 }
 
 // extractParams parses parameter types as dependencies.
-func (s *Scanner) extractParams(sig *types.Signature, annotations []Annotation) []TypeRef {
+func extractParams(sig *types.Signature, annotations []Annotation) []TypeRef {
 	params := sig.Params()
 	optionalTypes := GetAnnotationValues(annotations, AnnotOptional)
 

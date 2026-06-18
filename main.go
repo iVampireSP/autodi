@@ -1,25 +1,22 @@
-// Package main implements autodi, a compile-time dependency injection code generator.
+// Command autodi is a compile-time dependency-injection code generator.
 //
-// autodi scans Go packages for exported New* constructor functions, builds a
-// dependency graph via type analysis, performs topological sorting with cycle
-// detection, and generates a complete main.go with two-phase DI — replacing
-// runtime DI frameworks like uber/fx with zero-reflection, compile-time safe code.
+// autodi scans a Go module for exported New* constructors (the providers),
+// builds a dependency graph by type analysis, and — for each cmd/<face> package
+// that declares an //autodi:inject root assembler — emits cmd/<face>/gen.go with
+// a single func Inject() (T, func(), error) that constructs the whole graph in
+// topological order and calls the assembler. No runtime reflection, no DI
+// container.
 //
-// Generation flow:
+// Each cmd/<face> is an independent program. Shared code (internal/, pkg/, …)
+// stays completely autodi-agnostic: fan-in slices ([]Iface) are auto-collected,
+// single-implementation interfaces are auto-bound, and constructors that take
+// runtime data (string/int/…) rather than injectable dependencies are skipped by
+// the satisfiability filter — so no //autodi annotations are ever needed outside
+// cmd/.
 //
-//  1. Read go.mod → module path
-//  2. Read generate.go → //autodi:app/embed/group annotations
-//  3. Scan internal/ + pkg/ → provider candidates (New* constructors)
-//  4. Scan cmd/ → discover commands (entry points)
-//  5. Filter candidates to reachable providers (BFS from command params)
-//  6. Build dependency graph + resolve bindings + detect Close/Shutdown/Stop
-//  7. For each DI command:
-//     Analyze New* params → trace transitive deps → generate init function
-//  8. Generate main.go with two-phase DI
+// Usage (from a cmd dir, or repo root):
 //
-// Usage:
-//
-//	//go:generate go run github.com/iVampireSP/autodi@latest
+//	//go:generate go run github.com/iVampireSP/autodi
 package main
 
 import (
@@ -37,190 +34,160 @@ func main() {
 	dryRun := flag.Bool("dry-run", false, "print generated code without writing")
 	flag.Parse()
 
-	// Resolve module root: walk up from cwd to find go.mod
 	moduleRoot, err := findModuleRoot()
 	if err != nil {
 		log.Fatalf("autodi: %v", err)
 	}
 
-	// Build config from conventions (go.mod + generate.go)
 	cfg, err := BuildConfig(moduleRoot)
 	if err != nil {
 		log.Fatalf("autodi: %v", err)
 	}
-
 	if *verbose {
 		fmt.Fprintf(os.Stderr, "autodi: module=%s root=%s\n", cfg.Module, moduleRoot)
-		fmt.Fprintf(os.Stderr, "autodi: app=%s\n", cfg.AppName)
 	}
 
 	totalStart := time.Now()
+	gitignore := LoadGitignore(moduleRoot)
 
-	// Load gitignore patterns
-	gitignorePatterns := LoadGitignore(moduleRoot)
-
-	// ── Pass 1: Scan provider candidates ──
-
-	t0 := time.Now()
-	scanner := NewScanner(cfg, moduleRoot, gitignorePatterns)
-	candidates, err := scanner.Scan()
+	// Scan shared trees (internal/, pkg/, …) for provider candidates.
+	scanner := NewScanner(cfg, moduleRoot, gitignore)
+	shared, err := scanner.Scan()
 	if err != nil {
 		log.Fatalf("autodi: scan: %v", err)
 	}
-
 	if *verbose {
-		fmt.Fprintf(os.Stderr, "autodi: [%s] scan: discovered %d candidates\n", time.Since(t0), len(candidates))
+		fmt.Fprintf(os.Stderr, "autodi: scanned %d shared providers\n", len(shared))
 	}
 
-	// ── Pass 2: Discover commands from cmd/ packages ──
-
-	t1 := time.Now()
-	detector := NewCommandDetector(cfg, moduleRoot)
-	commands, err := detector.Detect()
+	// Discover per-cmd entry points (//autodi:inject assemblers).
+	detector := NewCommandDetector(cfg, moduleRoot, gitignore)
+	entries, err := detector.Detect()
 	if err != nil {
-		log.Fatalf("autodi: detect commands: %v", err)
+		log.Fatalf("autodi: detect entries: %v", err)
+	}
+	if len(entries) == 0 {
+		log.Fatalf("autodi: no //autodi:inject entry points found under cmd/")
 	}
 
-	if *verbose {
-		fmt.Fprintf(os.Stderr, "autodi: [%s] detect: discovered %d commands\n", time.Since(t1), len(commands))
-		for _, cmd := range commands {
-			var paramTypes []string
-			for _, p := range cmd.Params {
-				paramTypes = append(paramTypes, toShortTypeName(p.TypeStr))
-			}
-			kind := "multi"
-			if cmd.IsSingle {
-				kind = "single"
-			}
-			if !cmd.HasDeps() {
-				kind += "/zero-dep"
-			}
-			var handlers []string
-			for _, h := range cmd.Handlers {
-				handlers = append(handlers, h.MethodName)
-			}
-			fmt.Fprintf(os.Stderr, "  [%s] %s: %s.%s(%s) → [%s]\n",
-				kind, cmd.Name, cmd.StructName, cmd.FuncName,
-				strings.Join(paramTypes, ", "), strings.Join(handlers, ", "))
+	var generated int
+	for _, entry := range entries {
+		if *verbose {
+			fmt.Fprintf(os.Stderr, "autodi: entry %s → %s (%d roots, %d local providers)\n",
+				entry.RelDir, entry.FuncName, len(entry.Params), len(entry.Local))
 		}
-	}
 
-	// ── Pass 3: Filter to reachable providers only ──
-
-	t2 := time.Now()
-	providers := FilterReachable(candidates, commands, cfg, scanner.IfaceTypes, *verbose)
-
-	if *verbose {
-		fmt.Fprintf(os.Stderr, "autodi: [%s] reachable: %d candidates → %d providers\n",
-			time.Since(t2), len(candidates), len(providers))
-	}
-
-	// ── Pass 4: Build dependency graph ──
-
-	t3 := time.Now()
-	graph, errs := BuildGraph(providers, cfg, scanner.PkgIndex, scanner.IfaceTypes)
-	if len(errs) > 0 {
-		for _, e := range errs {
-			fmt.Fprintf(os.Stderr, "autodi: %v\n", e)
-		}
-		os.Exit(1)
-	}
-
-	if *verbose {
-		fmt.Fprintf(os.Stderr, "autodi: [%s] build graph\n", time.Since(t3))
-	}
-
-	t4 := time.Now()
-	if errs := graph.VerifyAcyclic(); len(errs) > 0 {
-		for _, e := range errs {
-			fmt.Fprintf(os.Stderr, "autodi: %v\n", e)
-		}
-		os.Exit(1)
-	}
-
-	if *verbose {
-		fmt.Fprintf(os.Stderr, "autodi: [%s] verify acyclic\n", time.Since(t4))
-	}
-
-	// Resolve interface bindings for command parameters
-	t5 := time.Now()
-	graph.BindCommandInterfaces(commands)
-
-	if *verbose {
-		fmt.Fprintf(os.Stderr, "autodi: [%s] bind command interfaces\n", time.Since(t5))
-	}
-
-	// Validate per-command dependencies
-	t6 := time.Now()
-	hasValidationErr := false
-	for _, cmd := range commands {
-		if !cmd.HasDeps() {
-			continue
-		}
-		var neededTypes []string
-		for _, param := range cmd.Params {
-			neededTypes = append(neededTypes, param.TypeStr)
-		}
-		pp, err := graph.ProvidersForTypes(neededTypes)
+		file, err := generateForEntry(cfg, scanner, shared, entry, *verbose)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "autodi: command %s: %v\n", cmd.Name, err)
-			hasValidationErr = true
-			continue
+			fmt.Fprintf(os.Stderr, "autodi: %s: %v\n", entry.RelDir, err)
+			os.Exit(1)
 		}
-		if errs := graph.ValidateEntry(cmd.Name, pp); len(errs) > 0 {
-			for _, e := range errs {
-				fmt.Fprintf(os.Stderr, "autodi: %v\n", e)
-			}
-			hasValidationErr = true
-		}
-		if *verbose {
-			fmt.Fprintf(os.Stderr, "autodi: command %s: %d providers\n", cmd.Name, len(pp))
-		}
-	}
-	if hasValidationErr {
-		os.Exit(1)
-	}
 
-	if *verbose {
-		fmt.Fprintf(os.Stderr, "autodi: [%s] validate commands\n", time.Since(t6))
-	}
-
-	// ── Generate code ──
-
-	t7 := time.Now()
-	gen := NewCodeGen(cfg, graph, commands, moduleRoot)
-	files, err := gen.Generate()
-	if err != nil {
-		log.Fatalf("autodi: generate: %v", err)
-	}
-
-	if *verbose {
-		fmt.Fprintf(os.Stderr, "autodi: [%s] generate code\n", time.Since(t7))
-	}
-
-	// Write or print generated files
-	t8 := time.Now()
-	for _, f := range files {
 		if *dryRun {
-			fmt.Fprintf(os.Stdout, "// === %s ===\n%s\n", f.Name, f.Content)
+			fmt.Fprintf(os.Stdout, "// === %s ===\n%s\n", file.Name, file.Content)
 			continue
 		}
-		path := filepath.Join(moduleRoot, f.Name)
-		if *verbose {
-			fmt.Fprintf(os.Stderr, "autodi: writing %s\n", path)
-		}
-		if err := os.WriteFile(path, f.Content, 0644); err != nil {
+		path := filepath.Join(moduleRoot, file.Name)
+		if err := os.WriteFile(path, file.Content, 0644); err != nil {
 			log.Fatalf("autodi: write %s: %v", path, err)
 		}
-	}
-
-	if *verbose {
-		fmt.Fprintf(os.Stderr, "autodi: [%s] write files\n", time.Since(t8))
+		if *verbose {
+			fmt.Fprintf(os.Stderr, "autodi: wrote %s\n", path)
+		}
+		generated++
 	}
 
 	if !*dryRun {
-		fmt.Fprintf(os.Stderr, "autodi: generated %d files in %s\n", len(files), time.Since(totalStart))
+		fmt.Fprintf(os.Stderr, "autodi: generated %d files in %s\n", generated, time.Since(totalStart))
 	}
+}
+
+// generateForEntry builds the per-cmd dependency graph and emits its gen.go.
+func generateForEntry(cfg *Config, scanner *Scanner, shared []*Provider, entry *DiscoveredCommand, verbose bool) (GeneratedFile, error) {
+	// This binary's private subtree (cmd/<face>/internal/...) holds its handlers,
+	// sub-routers, etc. — scan them as candidates for this entry only.
+	subtree, err := scanner.ScanSubtree(entry.RelDir)
+	if err != nil {
+		return GeneratedFile{}, fmt.Errorf("scan subtree: %w", err)
+	}
+	if verbose {
+		fmt.Fprintf(os.Stderr, "autodi: scanned %d providers under %s\n", len(subtree), entry.RelDir)
+	}
+
+	// Candidates = shared + this binary's subtree + cmd-local glue, minus cmd-side ignores.
+	candidates := make([]*Provider, 0, len(shared)+len(subtree)+len(entry.Local))
+	candidates = append(candidates, shared...)
+	candidates = append(candidates, subtree...)
+	candidates = append(candidates, entry.Local...)
+	if len(entry.Ignore) > 0 {
+		candidates = applyIgnores(candidates, entry.Ignore)
+	}
+
+	// Reachable from the assembler's params, then drop unwireable constructors.
+	reachable := FilterReachable(candidates, []*DiscoveredCommand{entry}, cfg, scanner.IfaceTypes, verbose)
+	live := FilterSatisfiable(reachable, scanner.IfaceTypes, verbose)
+
+	graph, errs := BuildGraph(live, cfg, scanner.PkgIndex, scanner.IfaceTypes)
+	if len(errs) > 0 {
+		return GeneratedFile{}, fmt.Errorf("build graph:\n  %s", joinErrors(errs))
+	}
+	if errs := graph.VerifyAcyclic(); len(errs) > 0 {
+		return GeneratedFile{}, fmt.Errorf("dependency cycle:\n  %s", joinErrors(errs))
+	}
+	graph.BindCommandInterfaces([]*DiscoveredCommand{entry})
+
+	// Validate the assembler's own dependencies resolve.
+	var neededTypes []string
+	for _, param := range entry.Params {
+		neededTypes = append(neededTypes, param.TypeStr)
+	}
+	pp, err := graph.ProvidersForTypes(neededTypes)
+	if err != nil {
+		return GeneratedFile{}, fmt.Errorf("resolve roots: %w", err)
+	}
+	if errs := graph.ValidateEntry(entry.RelDir, pp); len(errs) > 0 {
+		return GeneratedFile{}, fmt.Errorf("unsatisfied dependencies:\n  %s", joinErrors(errs))
+	}
+
+	gen := NewCodeGen(cfg, graph, []*DiscoveredCommand{entry}, scanner.moduleRoot)
+	files, err := gen.Generate()
+	if err != nil {
+		return GeneratedFile{}, err
+	}
+	if len(files) != 1 {
+		return GeneratedFile{}, fmt.Errorf("expected 1 generated file, got %d", len(files))
+	}
+	return files[0], nil
+}
+
+// applyIgnores drops candidates whose "<importpath>.<Func>" matches a cmd-side
+// //autodi:ignore directive (suffix match, so "internal/infra/cache.NewLocker"
+// or just "cache.NewLocker" both work).
+func applyIgnores(candidates []*Provider, ignores []string) []*Provider {
+	out := candidates[:0:0]
+	for _, p := range candidates {
+		full := p.PkgPath + "." + p.FuncName
+		drop := false
+		for _, ig := range ignores {
+			if full == ig || strings.HasSuffix(full, "/"+ig) || strings.HasSuffix(full, "."+ig) ||
+				p.PkgName+"."+p.FuncName == ig {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func joinErrors(errs []error) string {
+	parts := make([]string, len(errs))
+	for i, e := range errs {
+		parts[i] = e.Error()
+	}
+	return strings.Join(parts, "\n  ")
 }
 
 // findModuleRoot walks up from cwd to find the directory containing go.mod.
@@ -229,7 +196,6 @@ func findModuleRoot() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("getwd: %w", err)
 	}
-
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 			return dir, nil
@@ -241,8 +207,4 @@ func findModuleRoot() (string, error) {
 		dir = parent
 	}
 	return "", fmt.Errorf("go.mod not found in any parent directory")
-}
-
-func joinStrings(ss []string, sep string) string {
-	return strings.Join(ss, sep)
 }

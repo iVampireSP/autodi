@@ -23,6 +23,10 @@ type CodeGen struct {
 	commands   []*DiscoveredCommand
 	moduleRoot string
 	imports    *ImportManager
+
+	// injectZero is the zero value of the current entry's primary return type,
+	// used in provider error early-returns (Inject returns (T, func(), error)).
+	injectZero string
 }
 
 // NewCodeGen creates a code generator.
@@ -36,242 +40,42 @@ func NewCodeGen(cfg *Config, graph *Graph, commands []*DiscoveredCommand, module
 	}
 }
 
-// Generate produces the main.go file, an interactive DI diagram, and a package diagram.
+// Generate produces one gen.go per discovered cmd entry point.
 func (cg *CodeGen) Generate() ([]GeneratedFile, error) {
-	f, err := cg.generateMain()
-	if err != nil {
-		return nil, err
+	var files []GeneratedFile
+	for _, cmd := range cg.commands {
+		f, err := cg.generateGenFile(cmd)
+		if err != nil {
+			return nil, fmt.Errorf("generate %s: %w", cmd.RelDir, err)
+		}
+		files = append(files, f)
 	}
-	diGraph := GeneratedFile{
-		Name:    "dependency-graph.html",
-		Content: renderDIHTML(cg.graph, cg.commands, cg.cfg),
-	}
-
-	pkgContent, err := generatePkgDiagram(cg.cfg, cg.moduleRoot)
-	if err != nil {
-		pkgContent = []byte(fmt.Sprintf(
-			"<html><body><pre>autodi: package diagram failed: %v</pre></body></html>", err))
-	}
-	pkgDiag := GeneratedFile{
-		Name:    "package-diagram.html",
-		Content: pkgContent,
-	}
-
-	return []GeneratedFile{f, diGraph, pkgDiag}, nil
+	return files, nil
 }
 
-// generateMain generates the complete main.go with two-phase DI.
-func (cg *CodeGen) generateMain() (GeneratedFile, error) {
+// generateGenFile builds cmd/<face>/gen.go: package main + imports + func Inject().
+func (cg *CodeGen) generateGenFile(cmd *DiscoveredCommand) (GeneratedFile, error) {
 	cg.imports.Reset()
 
-	// Pre-register cmd package imports with predictable aliases
-	cmdAliases := make(map[string]string) // pkgPath → alias
-	for _, cmd := range cg.commands {
-		alias := cmd.PkgName + "cmd"
-		cmdAliases[cmd.PkgPath] = cg.imports.AddWithAlias(cmd.PkgPath, alias)
+	var body bytes.Buffer
+	if err := cg.generateInject(&body, cmd); err != nil {
+		return GeneratedFile{}, err
 	}
 
-	// We'll build the main function body and init functions separately,
-	// then combine them. First, generate all init functions to discover imports.
-	var initBuf bytes.Buffer
-	for _, cmd := range cg.commands {
-		if !cmd.HasDeps() {
-			continue
-		}
-		if err := cg.generateInitFunc(&initBuf, cmd, cmdAliases[cmd.PkgPath]); err != nil {
-			return GeneratedFile{}, fmt.Errorf("generate init for %s: %w", cmd.Name, err)
-		}
-		initBuf.WriteString("\n")
-	}
-
-	// Now generate the main function
-	var mainBuf bytes.Buffer
-
-	// main function
-	cg.imports.Add("os", "os")
-	cobraQualifier := cg.imports.Add("github.com/spf13/cobra", "cobra")
-
-	mainBuf.WriteString("func main() {\n")
-
-	// Root command
-	fmt.Fprintf(&mainBuf, "\troot := &%s.Command{Use: %q, Short: %q", cobraQualifier, cg.cfg.AppName, cg.cfg.AppShort)
-	if cg.cfg.AppLong != "" {
-		fmt.Fprintf(&mainBuf, ", Long: %q", cg.cfg.AppLong)
-	}
-	mainBuf.WriteString("}\n\n")
-
-	// Init function map (for DI commands)
-	hasDI := false
-	for _, cmd := range cg.commands {
-		if cmd.HasDeps() {
-			hasDI = true
-			break
-		}
-	}
-
-	if hasDI {
-		fmt.Fprintf(&mainBuf, "\ttype initFunc func(cmd, top *%s.Command) (func(), error)\n", cobraQualifier)
-		fmt.Fprintf(&mainBuf, "\tinitFuncs := make(map[*%s.Command]initFunc)\n\n", cobraQualifier)
-	}
-
-	// Register all commands
-	for _, cmd := range cg.commands {
-		alias := cmdAliases[cmd.PkgPath]
-		exportName := cmdExportName(cmd.Name)
-
-		// Generate zero-value args for constructor
-		var zeroArgs []string
-		for _, param := range cmd.Params {
-			zeroArgs = append(zeroArgs, zeroValueForType(param.Type))
-		}
-
-		mainBuf.WriteString("\t{\n")
-		fmt.Fprintf(&mainBuf, "\t\tstub := %s.%s(%s)\n", alias, cmd.FuncName, strings.Join(zeroArgs, ", "))
-
-		if cmd.IsSingle {
-			// Single command: Command() + direct RunE → Handle
-			mainBuf.WriteString("\t\tcmd := stub.Command()\n")
-			fmt.Fprintf(&mainBuf, "\t\tcmd.RunE = func(c *%s.Command, _ []string) error { return stub.Handle(c) }\n", cobraQualifier)
-			mainBuf.WriteString("\t\troot.AddCommand(cmd)\n")
-			if cmd.HasDeps() {
-				fmt.Fprintf(&mainBuf, "\t\tinitFuncs[cmd] = init%s\n", exportName)
-			}
-		} else {
-			// Multi-subcommand: Command() + wireRunE for each handler
-			mainBuf.WriteString("\t\ttree := stub.Command()\n")
-			for _, h := range cmd.Handlers {
-				cmdName := pascalToKebab(h.MethodName)
-				fmt.Fprintf(&mainBuf, "\t\twireRunE(tree, %q, stub.%s)\n", cmdName, h.MethodName)
-			}
-			mainBuf.WriteString("\t\troot.AddCommand(tree)\n")
-			if cmd.HasDeps() {
-				fmt.Fprintf(&mainBuf, "\t\tinitFuncs[tree] = init%s\n", exportName)
-			}
-		}
-
-		mainBuf.WriteString("\t}\n")
-	}
-
-	// PersistentPreRunE / PostRunE
-	if hasDI {
-		mainBuf.WriteString("\n\tvar cleanup func()\n")
-		fmt.Fprintf(&mainBuf, "\troot.PersistentPreRunE = func(cmd *%s.Command, args []string) error {\n", cobraQualifier)
-		mainBuf.WriteString("\t\ttop := cmd\n")
-		mainBuf.WriteString("\t\tfor top.HasParent() && top.Parent().HasParent() {\n")
-		mainBuf.WriteString("\t\t\ttop = top.Parent()\n")
-		mainBuf.WriteString("\t\t}\n")
-		mainBuf.WriteString("\t\tif fn, ok := initFuncs[top]; ok {\n")
-		mainBuf.WriteString("\t\t\tvar err error\n")
-		mainBuf.WriteString("\t\t\tcleanup, err = fn(cmd, top)\n")
-		mainBuf.WriteString("\t\t\treturn err\n")
-		mainBuf.WriteString("\t\t}\n")
-		mainBuf.WriteString("\t\treturn nil\n")
-		mainBuf.WriteString("\t}\n")
-		fmt.Fprintf(&mainBuf, "\troot.PersistentPostRunE = func(cmd *%s.Command, args []string) error {\n", cobraQualifier)
-		mainBuf.WriteString("\t\tif cleanup != nil {\n")
-		mainBuf.WriteString("\t\t\tcleanup()\n")
-		mainBuf.WriteString("\t\t}\n")
-		mainBuf.WriteString("\t\treturn nil\n")
-		mainBuf.WriteString("\t}\n")
-	}
-
-	mainBuf.WriteString("\n\tif err := root.Execute(); err != nil {\n")
-	fmt.Fprintf(&mainBuf, "\t\tos.Exit(1)\n")
-	mainBuf.WriteString("\t}\n")
-	mainBuf.WriteString("}\n")
-
-	// Generate helper functions
-	var helperBuf bytes.Buffer
-
-	// wireRunE — always needed (all commands use it for handler wiring)
-	cg.imports.Add("strings", "strings")
-	helperBuf.WriteString("// wireRunE connects a handler method to a subcommand's RunE by kebab-case name.\n")
-	helperBuf.WriteString("// For nested commands, the name segments form a path (e.g. \"pool-list\" matches pool→list).\n")
-	fmt.Fprintf(&helperBuf, "func wireRunE(parent *%s.Command, name string, handler func(*%s.Command) error) {\n", cobraQualifier, cobraQualifier)
-	helperBuf.WriteString("\t// Try exact match first (direct child)\n")
-	helperBuf.WriteString("\tfor _, sub := range parent.Commands() {\n")
-	helperBuf.WriteString("\t\tif sub.Name() == name {\n")
-	helperBuf.WriteString("\t\t\th := handler\n")
-	fmt.Fprintf(&helperBuf, "\t\t\tsub.RunE = func(cmd *%s.Command, _ []string) error { return h(cmd) }\n", cobraQualifier)
-	helperBuf.WriteString("\t\t\treturn\n")
-	helperBuf.WriteString("\t\t}\n")
-	helperBuf.WriteString("\t}\n")
-	helperBuf.WriteString("\t// Try path-based match: split name by \"-\" and greedily match child commands\n")
-	helperBuf.WriteString("\tparts := strings.Split(name, \"-\")\n")
-	helperBuf.WriteString("\twireRunEPath(parent, parts, handler)\n")
-	helperBuf.WriteString("}\n\n")
-
-	fmt.Fprintf(&helperBuf, "func wireRunEPath(parent *%s.Command, parts []string, handler func(*%s.Command) error) bool {\n", cobraQualifier, cobraQualifier)
-	helperBuf.WriteString("\tif len(parts) == 0 {\n")
-	helperBuf.WriteString("\t\treturn false\n")
-	helperBuf.WriteString("\t}\n")
-	helperBuf.WriteString("\t// Try progressively longer prefixes as the child command name\n")
-	helperBuf.WriteString("\tfor i := 1; i <= len(parts); i++ {\n")
-	helperBuf.WriteString("\t\tcandidate := strings.Join(parts[:i], \"-\")\n")
-	helperBuf.WriteString("\t\tfor _, sub := range parent.Commands() {\n")
-	helperBuf.WriteString("\t\t\tif sub.Name() != candidate {\n")
-	helperBuf.WriteString("\t\t\t\tcontinue\n")
-	helperBuf.WriteString("\t\t\t}\n")
-	helperBuf.WriteString("\t\t\tif i == len(parts) {\n")
-	helperBuf.WriteString("\t\t\t\t// Leaf match\n")
-	helperBuf.WriteString("\t\t\t\th := handler\n")
-	fmt.Fprintf(&helperBuf, "\t\t\t\tsub.RunE = func(cmd *%s.Command, _ []string) error { return h(cmd) }\n", cobraQualifier)
-	helperBuf.WriteString("\t\t\t\treturn true\n")
-	helperBuf.WriteString("\t\t\t}\n")
-	helperBuf.WriteString("\t\t\t// Try remaining parts as deeper path\n")
-	helperBuf.WriteString("\t\t\tif wireRunEPath(sub, parts[i:], handler) {\n")
-	helperBuf.WriteString("\t\t\t\treturn true\n")
-	helperBuf.WriteString("\t\t\t}\n")
-	helperBuf.WriteString("\t\t}\n")
-	helperBuf.WriteString("\t}\n")
-	helperBuf.WriteString("\treturn false\n")
-	helperBuf.WriteString("}\n")
-
-	// swapRunE + relativePath — only needed for DI commands
-	if hasDI {
-		helperBuf.WriteString("\n// swapRunE replaces the executing command's RunE with the real one from the DI-built tree.\n")
-		fmt.Fprintf(&helperBuf, "func swapRunE(executing, stubTop, realTop *%s.Command) {\n", cobraQualifier)
-		helperBuf.WriteString("\tpath := relativePath(executing, stubTop)\n")
-		helperBuf.WriteString("\ttarget := realTop\n")
-		helperBuf.WriteString("\tfor _, name := range path {\n")
-		helperBuf.WriteString("\t\tfor _, sub := range target.Commands() {\n")
-		helperBuf.WriteString("\t\t\tif sub.Name() == name {\n")
-		helperBuf.WriteString("\t\t\t\ttarget = sub\n")
-		helperBuf.WriteString("\t\t\t\tbreak\n")
-		helperBuf.WriteString("\t\t\t}\n")
-		helperBuf.WriteString("\t\t}\n")
-		helperBuf.WriteString("\t}\n")
-		helperBuf.WriteString("\texecuting.RunE = target.RunE\n")
-		helperBuf.WriteString("}\n\n")
-		fmt.Fprintf(&helperBuf, "func relativePath(cmd, ancestor *%s.Command) []string {\n", cobraQualifier)
-		helperBuf.WriteString("\tif cmd == ancestor {\n")
-		helperBuf.WriteString("\t\treturn nil\n")
-		helperBuf.WriteString("\t}\n")
-		helperBuf.WriteString("\treturn append(relativePath(cmd.Parent(), ancestor), cmd.Name())\n")
-		helperBuf.WriteString("}\n")
-	}
-
-	// Combine everything
 	var full bytes.Buffer
 	full.WriteString(generatedHeader)
 	full.WriteString("package main\n\n")
 	full.WriteString(cg.imports.FormatBlock())
 	full.WriteString("\n")
-	full.Write(mainBuf.Bytes())
-	full.WriteString("\n")
-	full.Write(initBuf.Bytes())
-	if helperBuf.Len() > 0 {
-		full.WriteString("\n")
-		full.Write(helperBuf.Bytes())
-	}
+	full.Write(body.Bytes())
 
+	name := cmd.RelDir + "/gen.go"
 	src, err := format.Source(full.Bytes())
 	if err != nil {
-		return GeneratedFile{Name: "main.go", Content: full.Bytes()},
-			fmt.Errorf("format main.go: %w\n--- source ---\n%s", err, full.String())
+		return GeneratedFile{Name: name, Content: full.Bytes()},
+			fmt.Errorf("format %s: %w\n--- source ---\n%s", name, err, full.String())
 	}
-
-	return GeneratedFile{Name: "main.go", Content: src}, nil
+	return GeneratedFile{Name: name, Content: src}, nil
 }
 
 // autoCollectParam records an auto-collected slice parameter.
@@ -282,11 +86,8 @@ type autoCollectParam struct {
 }
 
 // generateInitFunc generates an init<Cmd> function for a DI command.
-func (cg *CodeGen) generateInitFunc(buf *bytes.Buffer, cmd *DiscoveredCommand, cmdAlias string) error {
-	exportName := cmdExportName(cmd.Name)
-	cobraQualifier := cg.imports.Add("github.com/spf13/cobra", "cobra")
-
-	// Determine which types this command needs (from NewCommand params)
+func (cg *CodeGen) generateInject(buf *bytes.Buffer, cmd *DiscoveredCommand) error {
+	// Determine which types this entry needs (from the assembler's params)
 	var neededTypes []string
 	var groupParams []struct {
 		idx       int
@@ -330,29 +131,38 @@ func (cg *CodeGen) generateInitFunc(buf *bytes.Buffer, cmd *DiscoveredCommand, c
 		}
 	}
 
-	// Get providers in topological order
+	// Resolve providers in topological order, deep-auto-collecting []Interface
+	// params as we go. This is a FIXPOINT: collecting a slice (e.g. []Route) pulls
+	// in new providers (the sub-router handlers → their services), which may
+	// themselves have []Interface params (e.g. kservice's []LoadBalancerDriver).
+	// We rescan newly-resolved providers until no new auto-collect params appear.
+	deepAutoMap := make(map[string][]autoCollectParam) // "pkg.Func" → auto-collected slice params
+	scanned := make(map[string]bool)                   // providers already scanned for []iface params
+	extraEdges := make(map[string][]string)            // topo edges: consumer return → collected dep
 	providers, err := cg.graph.ProvidersForTypes(neededTypes)
 	if err != nil {
 		return fmt.Errorf("resolve deps for %s: %w", cmd.Name, err)
 	}
-
-	// Deep auto-collection: scan resolved providers for []Interface params
-	// that aren't handled by groups or command-level auto-collection.
-	deepAutoMap := make(map[string][]autoCollectParam) // provider typeStr → auto-collected params
-	needsResolve := false
-	for _, p := range providers {
-		for i, param := range p.Params {
-			if !strings.HasPrefix(param.TypeStr, "[]") {
+	for {
+		foundNew := false
+		for _, p := range providers {
+			key := p.PkgPath + "." + p.FuncName
+			if scanned[key] {
 				continue
 			}
-			// Skip if already handled by group
-			if cg.matchGroup(param.TypeStr) != "" {
-				continue
-			}
-			elemType := param.TypeStr[2:]
-			autoProviders := cg.graph.AutoCollect(elemType)
-			if len(autoProviders) > 0 {
-				key := p.PkgPath + "." + p.FuncName
+			scanned[key] = true
+			for i, param := range p.Params {
+				if !strings.HasPrefix(param.TypeStr, "[]") {
+					continue
+				}
+				if cg.matchGroup(param.TypeStr) != "" {
+					continue
+				}
+				elemType := param.TypeStr[2:]
+				autoProviders := cg.graph.AutoCollect(elemType)
+				if len(autoProviders) == 0 {
+					continue
+				}
 				deepAutoMap[key] = append(deepAutoMap[key], autoCollectParam{
 					idx:       i,
 					elemType:  elemType,
@@ -362,34 +172,19 @@ func (cg *CodeGen) generateInitFunc(buf *bytes.Buffer, cmd *DiscoveredCommand, c
 					for _, dep := range ap.Params {
 						neededTypes = append(neededTypes, dep.TypeStr)
 					}
-				}
-				needsResolve = true
-			}
-		}
-	}
-
-	// Re-resolve if deep auto-collection added new dependencies
-	if needsResolve {
-		// Build extra edges: consuming provider's return type → auto-collected providers' dependency types.
-		// This ensures the topological sort places auto-collected deps before the consuming provider.
-		extraEdges := make(map[string][]string)
-		for _, p := range providers {
-			key := p.PkgPath + "." + p.FuncName
-			aps, ok := deepAutoMap[key]
-			if !ok {
-				continue
-			}
-			for _, ret := range p.Returns {
-				for _, ap := range aps {
-					for _, cp := range ap.providers {
-						for _, dep := range cp.Params {
+					// Place collected deps before the consuming provider in topo order.
+					for _, ret := range p.Returns {
+						for _, dep := range ap.Params {
 							extraEdges[ret.TypeStr] = append(extraEdges[ret.TypeStr], dep.TypeStr)
 						}
 					}
 				}
+				foundNew = true
 			}
 		}
-
+		if !foundNew {
+			break
+		}
 		providers, err = cg.graph.ProvidersForTypesWithExtraEdges(neededTypes, extraEdges)
 		if err != nil {
 			return fmt.Errorf("resolve deps for %s (after auto-collect): %w", cmd.Name, err)
@@ -453,7 +248,10 @@ func (cg *CodeGen) generateInitFunc(buf *bytes.Buffer, cmd *DiscoveredCommand, c
 	}
 
 	// Generate function signature
-	fmt.Fprintf(buf, "func init%s(cmd, top *%s.Command) (func(), error) {\n", exportName, cobraQualifier)
+	primaryType := cg.shortType(cmd.PrimaryRet.TypeStr)
+	cg.injectZero = zeroValueForType(cmd.PrimaryRet.Type)
+	fmt.Fprintf(buf, "// Inject resolves the dependency graph and assembles %s.\n", primaryType)
+	fmt.Fprintf(buf, "func Inject() (%s, func(), error) {\n", primaryType)
 
 	hasAnyError := false
 	for _, p := range providers {
@@ -568,56 +366,51 @@ func (cg *CodeGen) generateInitFunc(buf *bytes.Buffer, cmd *DiscoveredCommand, c
 		varMap[cmd.Params[ap.idx].TypeStr] = varName
 	}
 
-	// Build NewCommand args
-	var newCmdArgs []string
+	// Build assembler args (the assembler lives in this package main → no qualifier).
+	var args []string
 	for _, param := range cmd.Params {
 		if varName, ok := varMap[param.TypeStr]; ok {
-			newCmdArgs = append(newCmdArgs, varName)
+			args = append(args, varName)
+		} else if varName, ok := varMap[cg.graph.resolveType(param.TypeStr)]; ok {
+			args = append(args, varName)
 		} else {
-			// Try resolving via bindings
-			resolved := cg.graph.resolveType(param.TypeStr)
-			if varName, ok := varMap[resolved]; ok {
-				newCmdArgs = append(newCmdArgs, varName)
-			} else {
-				newCmdArgs = append(newCmdArgs, "nil /* unresolved: "+toShortTypeName(param.TypeStr)+" */")
-			}
+			args = append(args, "nil /* unresolved: "+toShortTypeName(param.TypeStr)+" */")
 		}
 	}
 
-	// Create real command instance and wire handlers
-	fmt.Fprintf(buf, "\treal := %s.%s(%s)\n", cmdAlias, cmd.FuncName, strings.Join(newCmdArgs, ", "))
-
-	if cmd.IsSingle {
-		// Single command: Command() + direct RunE → Handle
-		cobraQ := cg.imports.Add("github.com/spf13/cobra", "cobra")
-		fmt.Fprintf(buf, "\trealCmd := real.Command()\n")
-		fmt.Fprintf(buf, "\trealCmd.RunE = func(c *%s.Command, _ []string) error { return real.Handle(c) }\n", cobraQ)
-		fmt.Fprintf(buf, "\tswapRunE(cmd, top, realCmd)\n\n")
-	} else {
-		// Multi-subcommand: Command() + wireRunE for each handler
-		fmt.Fprintf(buf, "\ttree := real.Command()\n")
-		for _, h := range cmd.Handlers {
-			cmdName := pascalToKebab(h.MethodName)
-			fmt.Fprintf(buf, "\twireRunE(tree, %q, real.%s)\n", cmdName, h.MethodName)
+	// providerCleanup runs the Close/Shutdown of constructed singletons, newest first.
+	buf.WriteString("\tproviderCleanup := func() {\n")
+	for i := len(closeables) - 1; i >= 0; i-- {
+		cl := closeables[i]
+		if cl.HasCtx {
+			cg.imports.Add("context", "context")
+			fmt.Fprintf(buf, "\t\tif %s != nil {\n\t\t\t%s.%s(context.Background())\n\t\t}\n", cl.VarName, cl.VarName, cl.Method)
+		} else {
+			fmt.Fprintf(buf, "\t\tif %s != nil {\n\t\t\t%s.%s()\n\t\t}\n", cl.VarName, cl.VarName, cl.Method)
 		}
-		fmt.Fprintf(buf, "\tswapRunE(cmd, top, tree)\n\n")
 	}
+	buf.WriteString("\t}\n")
 
-	// Generate cleanup function
-	if len(closeables) > 0 {
-		buf.WriteString("\treturn func() {\n")
-		for i := len(closeables) - 1; i >= 0; i-- {
-			cl := closeables[i]
-			if cl.HasCtx {
-				cg.imports.Add("context", "context")
-				fmt.Fprintf(buf, "\t\tif %s != nil {\n\t\t\t%s.%s(context.Background())\n\t\t}\n", cl.VarName, cl.VarName, cl.Method)
-			} else {
-				fmt.Fprintf(buf, "\t\tif %s != nil {\n\t\t\t%s.%s()\n\t\t}\n", cl.VarName, cl.VarName, cl.Method)
-			}
-		}
-		buf.WriteString("\t}, nil\n")
-	} else {
-		buf.WriteString("\treturn nil, nil\n")
+	zero := zeroValueForType(cmd.PrimaryRet.Type)
+	call := fmt.Sprintf("%s(%s)", cmd.FuncName, strings.Join(args, ", "))
+
+	// Call the assembler, normalizing its (T[,func()][,error]) shape to Inject's
+	// uniform (T, func(), error) return.
+	switch {
+	case cmd.HasCleanup && cmd.HasError:
+		fmt.Fprintf(buf, "\tprimary, assemblerCleanup, err := %s\n", call)
+		fmt.Fprintf(buf, "\tif err != nil {\n\t\tproviderCleanup()\n\t\treturn %s, nil, err\n\t}\n", zero)
+		buf.WriteString("\treturn primary, func() {\n\t\tif assemblerCleanup != nil {\n\t\t\tassemblerCleanup()\n\t\t}\n\t\tproviderCleanup()\n\t}, nil\n")
+	case cmd.HasCleanup:
+		fmt.Fprintf(buf, "\tprimary, assemblerCleanup := %s\n", call)
+		buf.WriteString("\treturn primary, func() {\n\t\tif assemblerCleanup != nil {\n\t\t\tassemblerCleanup()\n\t\t}\n\t\tproviderCleanup()\n\t}, nil\n")
+	case cmd.HasError:
+		fmt.Fprintf(buf, "\tprimary, err := %s\n", call)
+		fmt.Fprintf(buf, "\tif err != nil {\n\t\tproviderCleanup()\n\t\treturn %s, nil, err\n\t}\n", zero)
+		buf.WriteString("\treturn primary, providerCleanup, nil\n")
+	default:
+		fmt.Fprintf(buf, "\tprimary := %s\n", call)
+		buf.WriteString("\treturn primary, providerCleanup, nil\n")
 	}
 	buf.WriteString("}\n")
 
@@ -685,7 +478,7 @@ func (cg *CodeGen) writeLocalProviderCall(buf *bytes.Buffer, p *Provider, varMap
 			fmt.Fprintf(buf, "\t_, err := %s(%s)\n", qualifier, strings.Join(args, ", "))
 		}
 		fmt.Fprintf(buf, "\tif err != nil {\n")
-		fmt.Fprintf(buf, "\t\treturn nil, fmt.Errorf(\"%s.%s: %%w\", err)\n", p.PkgName, p.FuncName)
+		fmt.Fprintf(buf, "\t\treturn %s, nil, fmt.Errorf(\"%s.%s: %%w\", err)\n", cg.injectZero, p.PkgName, p.FuncName)
 		fmt.Fprintf(buf, "\t}\n")
 	} else {
 		if len(lhsNames) > 0 {
@@ -796,7 +589,7 @@ func (cg *CodeGen) writeSliceProviderCalls(buf *bytes.Buffer, sliceVarName, elem
 			lhs = append(lhs, "err")
 			fmt.Fprintf(buf, "\t%s := %s(%s)\n", strings.Join(lhs, ", "), qualifier, strings.Join(args, ", "))
 			fmt.Fprintf(buf, "\tif err != nil {\n")
-			fmt.Fprintf(buf, "\t\treturn nil, fmt.Errorf(\"%s.%s: %%w\", err)\n", p.PkgName, p.FuncName)
+			fmt.Fprintf(buf, "\t\treturn %s, nil, fmt.Errorf(\"%s.%s: %%w\", err)\n", cg.injectZero, p.PkgName, p.FuncName)
 			fmt.Fprintf(buf, "\t}\n")
 		} else {
 			fmt.Fprintf(buf, "\t%s := %s(%s)\n", strings.Join(lhs, ", "), qualifier, strings.Join(args, ", "))
