@@ -81,9 +81,12 @@ func parseModulePath(root string) (string, error) {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "module ") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "module ")), nil
+		if after, ok := strings.CutPrefix(line, "module "); ok {
+			return strings.TrimSpace(after), nil
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("scan go.mod: %w", err)
 	}
 	return "", fmt.Errorf("module directive not found in go.mod")
 }
